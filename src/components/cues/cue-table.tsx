@@ -2,6 +2,7 @@ import { AlarmClockCheck, Eye, Wrench } from "lucide-react";
 
 import { cues } from "@/lib/mock-data";
 import type { Cue } from "@/lib/types";
+import { getCueColorClasses } from "@/lib/cue-presentation";
 
 import { Card } from "@/components/ui/card";
 
@@ -40,8 +41,19 @@ export function CueTable() {
           <tbody className="divide-y divide-slate-800 bg-slate-900/50">
             {cues.map((cue) => (
               <tr key={cue.id} className="hover:bg-slate-900/90">
-                <td className="px-4 py-3 font-medium text-white">{cue.identifier}</td>
-                <td className="px-4 py-3">{cue.type}</td>
+                <td className="px-4 py-3 font-medium text-white">
+                  <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${getCueColorClasses(cue.type)}`}>
+                    {cue.identifier}
+                  </span>
+                </td>
+                <td className="px-4 py-3">
+                  <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${getCueColorClasses(cue.type)}`}>
+                    {cue.type}
+                  </span>
+                  {cue.type === "SIM" && cue.includedTypes && (
+                    <span className="ml-2 text-xs text-green-200">{cue.includedTypes.join(" + ")}</span>
+                  )}
+                </td>
                 <td className="px-4 py-3">{cue.act} · {cue.scene}</td>
                 <td className="px-4 py-3 text-slate-300">{cue.department}</td>
                 <td className="px-4 py-3">
@@ -75,7 +87,7 @@ export function CueTable() {
             <Wrench className="h-4 w-4" />
             <span className="text-xs uppercase tracking-[0.15em]">Seguridad</span>
           </div>
-          <p className="mt-2 text-sm text-slate-300">No se reordenan ni renumeran automáticamente los cues.</p>
+          <p className="mt-2 text-sm text-slate-300">Solo se renumeran los cues del libreto; los cues preexistentes mantienen su identificador.</p>
         </div>
       </div>
     </Card>

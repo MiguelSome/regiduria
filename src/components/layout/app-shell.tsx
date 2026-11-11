@@ -77,23 +77,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       </header>
 
-      <div className="mx-auto flex max-w-7xl gap-6 px-4 py-6 sm:px-6 lg:px-8">
-        <aside className="hidden w-72 shrink-0 rounded-2xl border border-slate-800 bg-slate-950/70 p-4 lg:block">
-          <p className="mb-4 text-xs uppercase tracking-[0.2em] text-slate-400">Módulos</p>
-          <div className="space-y-2">
-            {navigation.map((item) => (
-              <Link
-                key={item.href}
-                href={item.href}
-                className="flex rounded-xl border border-transparent px-3 py-2 text-sm text-slate-300 transition hover:border-slate-700 hover:bg-slate-900 hover:text-white"
-              >
-                {item.label}
-              </Link>
-            ))}
-          </div>
-        </aside>
-
-        <main className="flex-1">{children}</main>
+      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+        <main>{children}</main>
       </div>
     </div>
   );

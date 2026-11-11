@@ -1,4 +1,16 @@
-export type CueType = "LX" | "SON" | "MOV" | "UT" | "VEST";
+export type CueType =
+  | "LX"
+  | "SON"
+  | "MOV"
+  | "PREVENIR"
+  | "PROY"
+  | "ENT/MUT"
+  | "UT"
+  | "SIM"
+  | "AVISO"
+  | "VEST";
+export type CueComponentType = Exclude<CueType, "SIM" | "PREVENIR">;
+export type ScriptLabelCategory = "act" | "scene" | "cue";
 export type CueStatus = "Borrador" | "Preparado" | "Ejecutado" | "Pendiente";
 export type DepartmentName =
   | "Iluminación"
@@ -6,7 +18,10 @@ export type DepartmentName =
   | "Maquinaria"
   | "Utilería"
   | "Vestuario"
-  | "Caracterización";
+  | "Caracterización"
+  | "Vídeo"
+  | "Regiduría"
+  | "Reparto";
 
 export type SyncStatus = "Sincronizado" | "Pendiente" | "Conflicto";
 
@@ -44,13 +59,45 @@ export interface Cue {
   identifier: string;
   type: CueType;
   description: string;
+  pie?: string;
   act: string;
   scene: string;
   department: DepartmentName;
   observations: string;
   status: CueStatus;
   executionState: "Preparación" | "Función";
+  scriptDocumentId?: string;
+  scriptLabelId?: string;
+  includedTypes?: CueComponentType[];
 }
+
+export interface ScriptDocument {
+  id: string;
+  productionId: string;
+  fileName: string;
+  displayName?: string;
+  pdfData: Blob;
+  updatedAt: string;
+}
+
+export interface ScriptLabel {
+  id: string;
+  documentId: string;
+  productionId: string;
+  category: ScriptLabelCategory;
+  title: string;
+  pie?: string;
+  page: number;
+  x: number;
+  y: number;
+  cueType?: CueType;
+  includedTypes?: CueComponentType[];
+  cueId?: string;
+  cueIdentifier?: string;
+  cueIdentifierOverride?: string;
+}
+
+export type ScriptLabelDraft = Omit<ScriptLabel, "id" | "cueId">;
 
 export interface Incident {
   id: string;
