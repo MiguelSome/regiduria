@@ -1,7 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { Save, Trash2, Wrench } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -17,7 +18,13 @@ import {
   getCueIdentifierType,
   getNextCueIdentifier,
 } from "@/lib/cue-identifiers";
-import { deleteCue, getAllCues, getProductions, saveCue } from "@/lib/data-service";
+import {
+  deleteCue,
+  getCueById,
+  getCuesByProduction,
+  getProductions,
+  saveCue,
+} from "@/lib/data-service";
 import type { Cue, CueType, Production } from "@/lib/types";
 import { useUiStore } from "@/store/ui-store";
 
@@ -35,6 +42,8 @@ const emptyCue: Cue = {
   executionState: "Preparación",
 };
 
+type CueTypeFilter = CueType | "Todas";
+
 function getNextIdentifier(cues: Cue[], type: CueType): string {
   const identifierType = getCueIdentifierType(type);
   const maxNumber = cues.reduce((max, cue) => {
@@ -50,7 +59,9 @@ export function CueManager() {
   const [projects, setProjects] = useState<Production[]>([]);
   const [cues, setCues] = useState<Cue[]>([]);
   const [selectedProductionId, setSelectedProductionId] = useState<string>("");
+  const [selectedType, setSelectedType] = useState<CueTypeFilter>("Todas");
   const [form, setForm] = useState<Cue>(emptyCue);
+  const editCueHandled = useRef(false);
   const activeProjectId = useUiStore((state) => state.selectedProjectId);
   const setActiveProjectId = useUiStore((state) => state.setSelectedProjectId);
 
@@ -58,23 +69,30 @@ export function CueManager() {
     const nextProjects = await getProductions();
     setProjects(nextProjects);
 
-    if (nextProjects.length > 0) {
-      const selectedProject =
-        nextProjects.find((project) => project.id === activeProjectId) ?? nextProjects[0];
-      setSelectedProductionId(selectedProject.id);
-      setActiveProjectId(selectedProject.id);
-    }
+    const requestedCueId = editCueHandled.current
+      ? null
+      : new URLSearchParams(window.location.search).get("edit");
+    const requestedCue = requestedCueId ? await getCueById(requestedCueId) : undefined;
+    if (requestedCueId) editCueHandled.current = true;
+    const requestedProject = requestedCue
+      ? nextProjects.find((project) => project.id === requestedCue.productionId)
+      : undefined;
+    const selectedProject =
+      requestedProject ??
+      nextProjects.find((project) => project.id === activeProjectId) ??
+      nextProjects[0];
+    const nextProductionId = selectedProject?.id ?? "";
 
-    const nextCues = await getAllCues();
-    setCues(nextCues);
-
-    const requestedCueId = new URLSearchParams(window.location.search).get("edit");
-    const requestedCue = nextCues.find((cue) => cue.id === requestedCueId);
-    if (requestedCue) {
-      setSelectedProductionId(requestedCue.productionId);
-      setActiveProjectId(requestedCue.productionId);
-      setForm({ ...requestedCue });
-    }
+    setSelectedProductionId(nextProductionId);
+    if (nextProductionId !== activeProjectId) setActiveProjectId(nextProductionId);
+    setForm((current) => {
+      if (requestedCue && requestedCue.productionId === nextProductionId) {
+        return { ...requestedCue };
+      }
+      return current.productionId === nextProductionId
+        ? current
+        : { ...emptyCue, productionId: nextProductionId };
+    });
   }, [activeProjectId, setActiveProjectId]);
 
   useEffect(() => {
@@ -84,6 +102,19 @@ export function CueManager() {
 
     return () => window.clearTimeout(timer);
   }, [loadData]);
+
+  useEffect(() => {
+    let isCurrent = true;
+    if (!selectedProductionId) return;
+
+    void getCuesByProduction(selectedProductionId).then((nextCues) => {
+      if (isCurrent) setCues(nextCues);
+    });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [selectedProductionId]);
 
   useEffect(() => {
     if (!selectedProductionId || form.productionId) {
@@ -97,25 +128,30 @@ export function CueManager() {
     return () => window.clearTimeout(timer);
   }, [selectedProductionId, form.productionId]);
 
-  const visibleCues = useMemo(
+  const productionCues = useMemo(
     () => cues.filter((cue) => cue.productionId === selectedProductionId),
     [cues, selectedProductionId],
+  );
+  const visibleCues = useMemo(
+    () => productionCues.filter((cue) => selectedType === "Todas" || cue.type === selectedType),
+    [productionCues, selectedType],
   );
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (!selectedProductionId) return;
     const normalized: Cue = {
       ...form,
       id: form.id || crypto.randomUUID(),
-      productionId: selectedProductionId || form.productionId,
-      identifier: form.identifier.trim() || getNextIdentifier(visibleCues, form.type),
+      productionId: selectedProductionId,
+      identifier: form.identifier.trim() || getNextIdentifier(productionCues, form.type),
       description: form.description.trim(),
       pie: form.pie?.trim() ?? "",
       observations: form.observations.trim(),
     };
 
     await saveCue(normalized);
-    const nextCues = await getAllCues();
+    const nextCues = await getCuesByProduction(selectedProductionId);
     setCues(nextCues);
     setForm({ ...normalized });
   };
@@ -127,7 +163,7 @@ export function CueManager() {
     if (!window.confirm(message)) return;
 
     await deleteCue(cue.id);
-    const nextCues = await getAllCues();
+    const nextCues = await getCuesByProduction(selectedProductionId);
     setCues(nextCues);
   };
 
@@ -136,20 +172,92 @@ export function CueManager() {
   };
 
   return (
-    <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+    <div>
+      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <label className="block w-full space-y-2 text-sm text-slate-300 sm:max-w-sm">
+          <span>Producción</span>
+          <select
+            value={selectedProductionId}
+            disabled={projects.length === 0}
+            onChange={(event) => {
+              const productionId = event.target.value;
+              setSelectedProductionId(productionId);
+              setActiveProjectId(productionId);
+              setSelectedType("Todas");
+              setForm({ ...emptyCue, productionId });
+            }}
+            className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 disabled:opacity-60"
+          >
+            {projects.length === 0 ? (
+              <option value="">No hay proyectos</option>
+            ) : (
+              projects.map((project) => (
+                <option key={project.id} value={project.id}>{project.title}</option>
+              ))
+            )}
+          </select>
+        </label>
+        {projects.length === 0 && (
+          <p className="text-sm text-slate-400">
+            Crea primero un proyecto en{" "}
+            <Link href="/proyectos" className="text-cyan-300 underline underline-offset-4">
+              Proyectos
+            </Link>
+            .
+          </p>
+        )}
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
       <Card className="border-slate-800 bg-slate-900/80">
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Lista</p>
-            <h2 className="mt-2 text-xl font-semibold text-white">Cues por producción</h2>
+        <div className="mb-4 space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Lista</p>
+              <h2 className="mt-2 text-xl font-semibold text-white">Cues por producción</h2>
+            </div>
+            <div className="shrink-0 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2.5 py-1 text-xs text-cyan-300">
+              {visibleCues.length} cues
+            </div>
           </div>
-          <div className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2.5 py-1 text-xs text-cyan-300">
-            {visibleCues.length} registros
+
+          <div className="flex flex-wrap gap-2" role="group" aria-label="Filtrar cues por tipo">
+            <Button
+              type="button"
+              aria-pressed={selectedType === "Todas"}
+              onClick={() => setSelectedType("Todas")}
+              className={selectedType === "Todas"
+                ? "border-cyan-500/40 bg-cyan-500/15 text-cyan-200"
+                : "border-slate-700 bg-slate-950 text-slate-300"}
+            >
+              Todas
+            </Button>
+            {cueTypeOptions.map((option) => (
+              <Button
+                key={option.value}
+                type="button"
+                aria-pressed={selectedType === option.value}
+                onClick={() => setSelectedType(option.value)}
+                className={selectedType === option.value
+                  ? getCueColorClasses(option.value)
+                  : "border-slate-700 bg-slate-950 text-slate-300"}
+              >
+                {option.value}
+              </Button>
+            ))}
           </div>
         </div>
 
         <div className="space-y-3">
-          {visibleCues.map((cue) => (
+          {visibleCues.length === 0 ? (
+            <p role="status" className="rounded-xl border border-slate-800 bg-slate-950 px-4 py-6 text-sm text-slate-400">
+              {!selectedProductionId
+                ? "Crea un proyecto para empezar a añadir cues."
+                : productionCues.length === 0
+                  ? "Esta producción aún no tiene cues. Crea uno para empezar."
+                  : `No hay cues de tipo ${selectedType} en esta producción.`}
+            </p>
+          ) : visibleCues.map((cue) => (
             <div key={cue.id} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -198,23 +306,12 @@ export function CueManager() {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <label className="block space-y-2 text-sm text-slate-300">
-            <span>Producción</span>
-            <select
-              value={selectedProductionId}
-              onChange={(event) => {
-                setSelectedProductionId(event.target.value);
-                setActiveProjectId(event.target.value);
-                setForm((current) => ({ ...current, productionId: event.target.value }));
-              }}
-              className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none"
-            >
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>{project.title}</option>
-              ))}
-            </select>
-          </label>
-
+          {!selectedProductionId && (
+            <p role="status" className="text-sm text-slate-400">
+              Selecciona o crea un proyecto antes de añadir cues.
+            </p>
+          )}
+          <fieldset disabled={!selectedProductionId} className="space-y-4 disabled:opacity-50">
           <div className="grid gap-4 md:grid-cols-2">
             <label className="space-y-2 text-sm text-slate-300">
               <span>Identificador</span>
@@ -237,7 +334,7 @@ export function CueManager() {
                 onChange={(event) => {
                   const nextType = event.target.value as CueType;
                   setField("type", nextType);
-                  setField("identifier", getNextIdentifier(visibleCues, nextType));
+                  setField("identifier", getNextIdentifier(productionCues, nextType));
                   setField("department", cueDepartmentByType[nextType]);
                   setField("includedTypes", nextType === "SIM" ? ["LX", "MOV"] : undefined);
                 }}
@@ -399,8 +496,10 @@ export function CueManager() {
               Nuevo
             </Button>
           </div>
+          </fieldset>
         </form>
       </Card>
+      </div>
     </div>
   );
 }

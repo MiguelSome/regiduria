@@ -155,6 +155,10 @@ export async function getCuesByProduction(productionId: string): Promise<Cue[]> 
   return regiduriaDb.cues.where("productionId").equals(productionId).toArray();
 }
 
+export async function getCueById(id: string): Promise<Cue | undefined> {
+  return regiduriaDb.cues.get(id);
+}
+
 export async function getAllCues(): Promise<Cue[]> {
   return regiduriaDb.cues.orderBy("identifier").toArray();
 }
