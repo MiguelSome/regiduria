@@ -29,6 +29,7 @@ import {
   deleteScriptDocument,
   deleteScriptLabel,
   getCuesByProduction,
+  getProductions,
   getNextScriptCueIdentifier,
   getScriptDocument,
   getScriptLabels,
@@ -36,15 +37,16 @@ import {
   saveScriptDocument,
   saveScriptLabel,
 } from "@/lib/data-service";
-import { productions } from "@/lib/mock-data";
 import type {
   Cue,
   CueComponentType,
   CueType,
   DepartmentName,
+  Production,
   ScriptLabel,
   ScriptLabelCategory,
 } from "@/lib/types";
+import { useUiStore } from "@/store/ui-store";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
 
@@ -71,8 +73,25 @@ const hiddenLabelDepartments = new Set<DepartmentName>([
   "Regiduría",
 ]);
 
+const noProduction: Production = {
+  id: "",
+  title: "",
+  subtitle: "",
+  venue: "",
+  status: "Activa",
+  syncStatus: "Pendiente",
+  lastUpdated: "",
+  summary: "",
+  departments: [],
+  scenes: [],
+};
+
 export function LibretoViewer() {
-  const production = productions[0];
+  const [projects, setProjects] = useState<Production[]>([]);
+  const selectedProjectId = useUiStore((state) => state.selectedProjectId);
+  const setSelectedProjectId = useUiStore((state) => state.setSelectedProjectId);
+  const production = projects.find((project) => project.id === selectedProjectId) ?? noProduction;
+  const [projectsLoading, setProjectsLoading] = useState(true);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [pdfDoc, setPdfDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
@@ -104,11 +123,49 @@ export function LibretoViewer() {
 
   useEffect(() => {
     let active = true;
+    void getProductions()
+      .then((savedProjects) => {
+        if (!active) return;
+        setProjects(savedProjects);
+        const selectedProject =
+          savedProjects.find((project) => project.id === selectedProjectId) ?? savedProjects[0];
+        setSelectedProjectId(selectedProject?.id ?? "");
+        setProjectsLoading(false);
+      })
+      .catch((loadError: unknown) => {
+        console.error(loadError);
+        if (active) {
+          setStatus("error");
+          setError("No se pudieron cargar los proyectos guardados.");
+          setProjectsLoading(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [selectedProjectId, setSelectedProjectId]);
+
+  useEffect(() => {
+    let active = true;
 
     const restoreSavedPdf = async () => {
       try {
-        const savedDocument = await getScriptDocument(production.id);
-        if (!savedDocument) return;
+        const savedDocument = production.id
+          ? await getScriptDocument(production.id)
+          : undefined;
+        if (!production.id || !savedDocument) {
+          if (!active) return;
+          setPdfDoc(null);
+          setPdfTask(null);
+          setScriptDocument(undefined);
+          setLabels([]);
+          setCues([]);
+          setTotalPages(0);
+          setPageNumber(1);
+          setStatus("idle");
+          return;
+        }
 
         const bytes = new Uint8Array(await savedDocument.pdfData.arrayBuffer());
         const loadingTask = pdfjsLib.getDocument({ data: bytes });
@@ -435,7 +492,7 @@ export function LibretoViewer() {
     : production.title;
   const cueById = new Map(cues.map((cue) => [cue.id, cue]));
   const departmentNames = Array.from(new Set<DepartmentName>([
-    ...productions.flatMap((item) => item.departments.map((department) => department.name)),
+    ...production.departments.map((department) => department.name),
     ...Object.values(cueDepartmentByType),
     ...cues.map((cue) => cue.department),
   ])).filter((department) => !hiddenLabelDepartments.has(department));
@@ -449,6 +506,30 @@ export function LibretoViewer() {
     labelsByDepartment.set(department, [...(labelsByDepartment.get(department) ?? []), label]);
   }
   const actNames = Array.from(new Set(production.scenes.map((scene) => scene.act)));
+
+  if (!production.id) {
+    return (
+      <Card className="flex min-h-64 flex-col items-center justify-center border-dashed border-slate-700 bg-slate-900/60 text-center">
+        <FileText className="h-9 w-9 text-slate-500" />
+        <h2 className="mt-4 text-lg font-semibold text-white">
+          {projectsLoading ? "Cargando proyectos…" : "Selecciona un proyecto"}
+        </h2>
+        <p className="mt-2 max-w-md text-sm leading-6 text-slate-400">
+          {projectsLoading
+            ? "Estamos buscando las obras guardadas en este navegador."
+            : "Crea un proyecto y añade su PDF para trabajar con el libreto."}
+        </p>
+        {!projectsLoading && (
+          <Link
+            href="/proyectos"
+            className="mt-4 rounded-lg bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-300"
+          >
+            Ir a proyectos
+          </Link>
+        )}
+      </Card>
+    );
+  }
 
   const renderLabelButton = (label: ScriptLabel) => (
     <button

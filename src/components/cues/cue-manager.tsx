@@ -1,7 +1,7 @@
 "use client";
 
 import { Save, Trash2, Wrench } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -19,6 +19,7 @@ import {
 } from "@/lib/cue-identifiers";
 import { deleteCue, getAllCues, getProductions, saveCue } from "@/lib/data-service";
 import type { Cue, CueType, Production } from "@/lib/types";
+import { useUiStore } from "@/store/ui-store";
 
 const emptyCue: Cue = {
   id: "",
@@ -50,13 +51,18 @@ export function CueManager() {
   const [cues, setCues] = useState<Cue[]>([]);
   const [selectedProductionId, setSelectedProductionId] = useState<string>("");
   const [form, setForm] = useState<Cue>(emptyCue);
+  const activeProjectId = useUiStore((state) => state.selectedProjectId);
+  const setActiveProjectId = useUiStore((state) => state.setSelectedProjectId);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     const nextProjects = await getProductions();
     setProjects(nextProjects);
 
     if (nextProjects.length > 0) {
-      setSelectedProductionId((current) => current || nextProjects[0].id);
+      const selectedProject =
+        nextProjects.find((project) => project.id === activeProjectId) ?? nextProjects[0];
+      setSelectedProductionId(selectedProject.id);
+      setActiveProjectId(selectedProject.id);
     }
 
     const nextCues = await getAllCues();
@@ -66,9 +72,10 @@ export function CueManager() {
     const requestedCue = nextCues.find((cue) => cue.id === requestedCueId);
     if (requestedCue) {
       setSelectedProductionId(requestedCue.productionId);
+      setActiveProjectId(requestedCue.productionId);
       setForm({ ...requestedCue });
     }
-  };
+  }, [activeProjectId, setActiveProjectId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -76,7 +83,7 @@ export function CueManager() {
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [loadData]);
 
   useEffect(() => {
     if (!selectedProductionId || form.productionId) {
@@ -197,6 +204,7 @@ export function CueManager() {
               value={selectedProductionId}
               onChange={(event) => {
                 setSelectedProductionId(event.target.value);
+                setActiveProjectId(event.target.value);
                 setForm((current) => ({ ...current, productionId: event.target.value }));
               }}
               className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none"

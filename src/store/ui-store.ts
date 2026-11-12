@@ -10,8 +10,18 @@ interface UiState {
 
 export const useUiStore = create<UiState>((set) => ({
   isDark: true,
-  selectedProjectId: "p-1",
+  selectedProjectId:
+    typeof window === "undefined" ? "" : window.localStorage.getItem("regiduria:active-project") ?? "",
   setTheme: (value) => set({ isDark: value }),
   toggleTheme: () => set((state) => ({ isDark: !state.isDark })),
-  setSelectedProjectId: (projectId) => set({ selectedProjectId: projectId }),
+  setSelectedProjectId: (projectId) => {
+    if (typeof window !== "undefined") {
+      if (projectId) {
+        window.localStorage.setItem("regiduria:active-project", projectId);
+      } else {
+        window.localStorage.removeItem("regiduria:active-project");
+      }
+    }
+    set({ selectedProjectId: projectId });
+  },
 }));

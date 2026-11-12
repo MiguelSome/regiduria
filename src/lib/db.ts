@@ -33,6 +33,26 @@ class RegiduriaDb extends Dexie {
       scriptDocuments: "id, productionId",
       scriptLabels: "id, documentId, category, page, cueId",
     });
+    this.version(3)
+      .stores({
+        productions: "id, title, status, syncStatus",
+        cues: "id, productionId, identifier, status, executionState, scriptDocumentId",
+        incidents: "id, productionId, date, status",
+        performances: "id, productionId, date, title",
+        scriptDocuments: "id, productionId",
+        scriptLabels: "id, documentId, category, page, cueId, productionId",
+      })
+      .upgrade(async (transaction) => {
+        const seedProjectIds = ["p-1", "p-2"];
+        await transaction.table("productions").bulkDelete(seedProjectIds);
+        await Promise.all([
+          transaction.table("cues").where("productionId").anyOf(seedProjectIds).delete(),
+          transaction.table("incidents").where("productionId").anyOf(seedProjectIds).delete(),
+          transaction.table("performances").where("productionId").anyOf(seedProjectIds).delete(),
+          transaction.table("scriptDocuments").where("productionId").anyOf(seedProjectIds).delete(),
+          transaction.table("scriptLabels").where("productionId").anyOf(seedProjectIds).delete(),
+        ]);
+      });
   }
 }
 

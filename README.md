@@ -26,7 +26,7 @@ Regiduría es una aplicación de gestión escénica para producciones teatrales,
 La primera iteración incluye una base operativa con los siguientes módulos:
 
 - panel general de producción
-- gestión de proyectos
+- gestión de proyectos creados por el usuario, con PDF obligatorio vinculado a cada obra, selección activa, guardado automático del editor y gestión de equipo artístico y técnico
 - cues con diferenciación de preparación y función, campo Pie para registrar la acción que los dispara y mostrarla durante la función
 - libreto PDF guardado localmente, con nombre visible derivado del archivo y editable, además de etiquetas de acto, escena y cue ubicadas en página
 - cues de libreto con identificador automático editable; se admiten identificadores enteros y decimales (por ejemplo, LX-5.5), y la sugerencia automática continúa con el siguiente entero libre
@@ -35,7 +35,7 @@ La primera iteración incluye una base operativa con los siguientes módulos:
 - cues simultáneos configurables con dos o más tipos de señal; los avisos a intérpretes se asignan al departamento Reparto
 - modo función para ensayos y representaciones, con preparación previa, avisos temporizados 30/15/5, checklist por sonido y departamentos, y un visor de libreto que sigue la página de la cue en prevenido y se navega con ↑/↓
 - incidencias y reportes
-- sistema de persistencia local con Dexie
+- sistema de persistencia local con Dexie; los proyectos, PDFs y equipos permanecen en el navegador donde se crean
 
 ## Verificación
 

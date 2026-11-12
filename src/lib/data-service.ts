@@ -5,8 +5,7 @@ import {
   getCueIdentifierType,
   getNextCueIdentifier,
 } from "@/lib/cue-identifiers";
-import { cueSchema, scriptLabelSchema } from "@/lib/schemas";
-import { cues as seedCues, incidents as seedIncidents, performances as seedPerformances, productions as seedProductions } from "@/lib/mock-data";
+import { cueSchema, productionSchema, scriptLabelSchema } from "@/lib/schemas";
 import type {
   Cue,
   CueType,
@@ -144,37 +143,51 @@ export async function getNextScriptCueIdentifier(
   return identifier;
 }
 
-export async function ensureSeedData() {
-  const productionCount = await regiduriaDb.productions.count();
-  if (productionCount > 0) {
-    return;
-  }
-
-  await regiduriaDb.transaction("rw", regiduriaDb.productions, regiduriaDb.cues, regiduriaDb.incidents, regiduriaDb.performances, async () => {
-    await regiduriaDb.productions.bulkPut(seedProductions);
-    await regiduriaDb.cues.bulkPut(seedCues);
-    await regiduriaDb.incidents.bulkPut(seedIncidents);
-    await regiduriaDb.performances.bulkPut(seedPerformances);
-  });
-}
-
 export async function getProductions(): Promise<Production[]> {
-  await ensureSeedData();
   return regiduriaDb.productions.orderBy("title").toArray();
 }
 
+export async function getProduction(id: string): Promise<Production | undefined> {
+  return regiduriaDb.productions.get(id);
+}
+
 export async function getCuesByProduction(productionId: string): Promise<Cue[]> {
-  await ensureSeedData();
   return regiduriaDb.cues.where("productionId").equals(productionId).toArray();
 }
 
 export async function getAllCues(): Promise<Cue[]> {
-  await ensureSeedData();
   return regiduriaDb.cues.orderBy("identifier").toArray();
 }
 
 export async function saveProduction(production: Production): Promise<void> {
-  await regiduriaDb.productions.put(production);
+  const validatedProduction = productionSchema.parse(production);
+  await regiduriaDb.productions.put(validatedProduction);
+}
+
+export async function createProductionWithPdf(
+  production: Production,
+  fileName: string,
+  pdfData: Blob,
+): Promise<void> {
+  const validatedProduction = productionSchema.parse(production);
+  const document: ScriptDocument = {
+    id: validatedProduction.id,
+    productionId: validatedProduction.id,
+    fileName,
+    displayName: fileName.replace(/\.pdf$/i, ""),
+    pdfData,
+    updatedAt: new Date().toISOString(),
+  };
+
+  await regiduriaDb.transaction(
+    "rw",
+    regiduriaDb.productions,
+    regiduriaDb.scriptDocuments,
+    async () => {
+      await regiduriaDb.productions.add(validatedProduction);
+      await regiduriaDb.scriptDocuments.add(document);
+    },
+  );
 }
 
 export async function deleteProduction(id: string): Promise<void> {
@@ -184,11 +197,39 @@ export async function deleteProduction(id: string): Promise<void> {
     regiduriaDb.cues,
     regiduriaDb.scriptDocuments,
     regiduriaDb.scriptLabels,
+    regiduriaDb.incidents,
     async () => {
       await regiduriaDb.productions.delete(id);
       await regiduriaDb.cues.where("productionId").equals(id).delete();
       await regiduriaDb.scriptDocuments.delete(id);
       await regiduriaDb.scriptLabels.where("documentId").equals(id).delete();
+      await regiduriaDb.incidents.where("productionId").equals(id).delete();
+    },
+  );
+  await regiduriaDb.performances.where("productionId").equals(id).delete();
+}
+
+export async function deleteAllProductions(): Promise<void> {
+  await regiduriaDb.transaction(
+    "rw",
+    regiduriaDb.productions,
+    regiduriaDb.cues,
+    regiduriaDb.scriptDocuments,
+    regiduriaDb.scriptLabels,
+    async () => {
+      await regiduriaDb.productions.clear();
+      await regiduriaDb.cues.clear();
+      await regiduriaDb.scriptDocuments.clear();
+      await regiduriaDb.scriptLabels.clear();
+    },
+  );
+  await regiduriaDb.transaction(
+    "rw",
+    regiduriaDb.incidents,
+    regiduriaDb.performances,
+    async () => {
+      await regiduriaDb.incidents.clear();
+      await regiduriaDb.performances.clear();
     },
   );
 }
@@ -401,11 +442,9 @@ export async function deleteScriptLabel(id: string): Promise<void> {
 }
 
 export async function getIncidents(): Promise<Incident[]> {
-  await ensureSeedData();
   return regiduriaDb.incidents.orderBy("date").reverse().toArray();
 }
 
 export async function getPerformances(): Promise<Performance[]> {
-  await ensureSeedData();
   return regiduriaDb.performances.orderBy("date").toArray();
 }

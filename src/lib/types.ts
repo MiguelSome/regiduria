@@ -32,6 +32,30 @@ export interface Department {
   notes: string[];
 }
 
+export interface TechnicalStaffMember {
+  id: string;
+  name: string;
+  tag: string;
+}
+
+export interface TechnicalDepartmentTeam {
+  department: DepartmentName;
+  head: string;
+  technicians: TechnicalStaffMember[];
+}
+
+export interface ArtisticTeamMember {
+  id: string;
+  name: string;
+  role: string;
+  character?: string;
+}
+
+export interface ProjectTeam {
+  technical: TechnicalDepartmentTeam[];
+  artistic: ArtisticTeamMember[];
+}
+
 export interface Scene {
   id: string;
   act: string;
@@ -51,6 +75,7 @@ export interface Production {
   summary: string;
   departments: Department[];
   scenes: Scene[];
+  team?: ProjectTeam;
 }
 
 export interface Cue {

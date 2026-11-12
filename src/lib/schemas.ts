@@ -13,20 +13,49 @@ export const departmentSchema = z.object({
     "Regiduría",
     "Reparto",
   ]),
-  responsable: z.string().min(1),
+  responsable: z.string(),
   notes: z.array(z.string()),
+});
+
+const projectTeamSchema = z.object({
+  technical: z.array(z.object({
+    department: z.enum([
+      "Iluminación",
+      "Sonido",
+      "Maquinaria",
+      "Utilería",
+      "Vestuario",
+      "Caracterización",
+      "Vídeo",
+      "Regiduría",
+      "Reparto",
+    ]),
+    head: z.string(),
+    technicians: z.array(z.object({
+      id: z.string(),
+      name: z.string(),
+      tag: z.string(),
+    })),
+  })),
+  artistic: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    role: z.string(),
+    character: z.string().optional(),
+  })),
 });
 
 export const productionSchema = z.object({
   id: z.string(),
   title: z.string().min(1),
-  subtitle: z.string().min(1),
-  venue: z.string().min(1),
+  subtitle: z.string(),
+  venue: z.string(),
   status: z.enum(["Activa", "Archivada"]),
   syncStatus: z.enum(["Sincronizado", "Pendiente", "Conflicto"]),
   lastUpdated: z.string(),
-  summary: z.string().min(1),
+  summary: z.string(),
   departments: z.array(departmentSchema),
+  team: projectTeamSchema.optional(),
   scenes: z.array(
     z.object({
       id: z.string(),

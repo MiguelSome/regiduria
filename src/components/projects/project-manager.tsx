@@ -1,225 +1,638 @@
 "use client";
 
-import { FolderOpen, Save, Trash2, UserRound } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Check,
+  FileText,
+  FolderOpen,
+  Plus,
+  Save,
+  Trash2,
+  Upload,
+  Users,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { deleteProduction, getProductions, saveProduction } from "@/lib/data-service";
-import type { Production } from "@/lib/types";
+import { createEmptyProjectTeam, ProjectTeamDialog } from "@/components/projects/project-team-dialog";
+import {
+  createProductionWithPdf,
+  deleteAllProductions,
+  deleteProduction,
+  getProductions,
+  getScriptDocument,
+  saveProduction,
+  saveScriptDocument,
+} from "@/lib/data-service";
+import type { DepartmentName, Production, ScriptDocument } from "@/lib/types";
+import { useUiStore } from "@/store/ui-store";
 
-const emptyProduction: Production = {
-  id: "",
-  title: "",
-  subtitle: "",
-  venue: "",
-  status: "Activa",
-  syncStatus: "Pendiente",
-  lastUpdated: new Date().toISOString(),
-  summary: "",
-  departments: [],
-  scenes: [],
-};
+const technicalDepartments: DepartmentName[] = [
+  "Regiduría",
+  "Iluminación",
+  "Sonido",
+  "Maquinaria",
+  "Utilería",
+  "Vestuario",
+  "Caracterización",
+  "Vídeo",
+];
+
+function createBlankProduction(): Production {
+  return {
+    id: "",
+    title: "",
+    subtitle: "",
+    venue: "",
+    status: "Activa",
+    syncStatus: "Pendiente",
+    lastUpdated: "",
+    summary: "",
+    departments: [],
+    scenes: [],
+    team: createEmptyProjectTeam(),
+  };
+}
+
+function cloneProduction(project: Production): Production {
+  const projectTeam = project.team ?? createEmptyProjectTeam();
+  return {
+    ...project,
+    departments: project.departments.map((department) => ({
+      ...department,
+      notes: [...department.notes],
+    })),
+    scenes: project.scenes.map((scene) => ({ ...scene })),
+    team: {
+      ...projectTeam,
+      technical: projectTeam.technical.map((department) => ({
+        ...department,
+        head: department.head ||
+          project.departments.find((item) => item.name === department.department)?.responsable ||
+          "",
+        technicians: department.technicians.map((technician) => ({ ...technician })),
+      })),
+      artistic: projectTeam.artistic.map((member) => ({ ...member })),
+    },
+  };
+}
+
+function isPdf(file: File): boolean {
+  return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+}
 
 export function ProjectManager() {
   const [projects, setProjects] = useState<Production[]>([]);
-  const [form, setForm] = useState<Production>(emptyProduction);
+  const [form, setForm] = useState<Production>(createBlankProduction);
+  const [isCreating, setIsCreating] = useState(false);
+  const [isTeamOpen, setIsTeamOpen] = useState(false);
+  const [pdfDocument, setPdfDocument] = useState<ScriptDocument | null>(null);
+  const [newPdfFile, setNewPdfFile] = useState<File | null>(null);
+  const [isSavingPdf, setIsSavingPdf] = useState(false);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [error, setError] = useState<string | null>(null);
+  const selectedProjectId = useUiStore((state) => state.selectedProjectId);
+  const setSelectedProjectId = useUiStore((state) => state.setSelectedProjectId);
+  const createPdfInputRef = useRef<HTMLInputElement | null>(null);
+  const replacePdfInputRef = useRef<HTMLInputElement | null>(null);
+  const saveRevision = useRef(0);
 
   const loadProjects = useCallback(async () => {
-    const data = await getProductions();
-    setProjects(data);
-    if (data.length > 0 && !form.id) {
-      setForm(data[0]);
+    try {
+      const data = await getProductions();
+      setProjects(data);
+      const activeProject = data.find((project) => project.id === selectedProjectId) ?? data[0];
+      if (activeProject) {
+        if (activeProject.id !== selectedProjectId) setSelectedProjectId(activeProject.id);
+        setForm(cloneProduction(activeProject));
+        setIsCreating(false);
+      } else {
+        setSelectedProjectId("");
+        setForm(createBlankProduction());
+      }
+    } catch (loadError) {
+      console.error(loadError);
+      setError("No se pudieron cargar los proyectos guardados.");
     }
-  }, [form.id]);
+  }, [selectedProjectId, setSelectedProjectId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void loadProjects();
     }, 0);
-
     return () => window.clearTimeout(timer);
   }, [loadProjects]);
 
-  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  useEffect(() => {
+    if (isCreating || !form.id || selectedProjectId !== form.id) return;
 
-    const normalized: Production = {
-      ...form,
-      id: form.id || crypto.randomUUID(),
-      lastUpdated: new Date().toISOString(),
-      title: form.title.trim(),
-      subtitle: form.subtitle.trim(),
-      venue: form.venue.trim(),
-      summary: form.summary.trim(),
-      departments: form.departments.length > 0 ? form.departments : [
-        {
-          id: crypto.randomUUID(),
-          name: "Iluminación",
-          responsable: "Responsable",
-          notes: ["Primera nota de departamento"],
-        },
-      ],
-      scenes: form.scenes.length > 0 ? form.scenes : [
-        {
-          id: crypto.randomUUID(),
-          act: "Acto I",
-          number: "1",
-          title: "Escena inicial",
-          summary: "Resumen de la escena",
-        },
-      ],
+    const revision = ++saveRevision.current;
+    const timeout = window.setTimeout(() => {
+      setSaveState("saving");
+      void saveProduction({ ...form, lastUpdated: new Date().toISOString() })
+        .then(() => {
+          if (revision !== saveRevision.current) return;
+          setProjects((current) => current.map((project) =>
+            project.id === form.id ? { ...form, lastUpdated: new Date().toISOString() } : project,
+          ));
+          setSaveState("saved");
+          setError(null);
+        })
+        .catch((saveError: unknown) => {
+          console.error(saveError);
+          if (revision !== saveRevision.current) return;
+          setSaveState("error");
+          setError("No se pudieron guardar los cambios del proyecto.");
+        });
+    }, 450);
+
+    return () => window.clearTimeout(timeout);
+  }, [form, isCreating, selectedProjectId]);
+
+  useEffect(() => {
+    let active = true;
+    if (!form.id || isCreating) return;
+
+    void getScriptDocument(form.id)
+      .then((document) => {
+        if (active) setPdfDocument(document ?? null);
+      })
+      .catch((loadError: unknown) => {
+        console.error(loadError);
+        if (active) setError("No se pudo consultar el PDF asociado al proyecto.");
+      });
+
+    return () => {
+      active = false;
     };
+  }, [form.id, isCreating]);
 
-    await saveProduction(normalized);
-    const nextProjects = await getProductions();
-    setProjects(nextProjects);
-    setForm(normalized);
+  const beginNewProject = () => {
+    saveRevision.current += 1;
+    setError(null);
+    setSaveState("idle");
+    setPdfDocument(null);
+    setNewPdfFile(null);
+    setForm(createBlankProduction());
+    setIsCreating(true);
   };
 
-  const handleEdit = (project: Production) => {
-    setForm(project);
-  };
-
-  const handleDelete = async (id: string) => {
-    await deleteProduction(id);
-    const nextProjects = await getProductions();
-    setProjects(nextProjects);
-    if (nextProjects[0]) {
-      setForm(nextProjects[0]);
-    } else {
-      setForm(emptyProduction);
+  const selectProject = async (project: Production, saveCurrent = true) => {
+    if (saveCurrent && form.id && form.id === selectedProjectId && !isCreating) {
+      try {
+        await saveProduction({ ...form, lastUpdated: new Date().toISOString() });
+      } catch (saveError) {
+        console.error(saveError);
+        setError("No se pudieron guardar los cambios; sigue seleccionado el proyecto actual.");
+        return;
+      }
     }
+
+    saveRevision.current += 1;
+    setError(null);
+    setSaveState("idle");
+    setNewPdfFile(null);
+    setPdfDocument(null);
+    setForm(cloneProduction(project));
+    setSelectedProjectId(project.id);
+    setIsCreating(false);
   };
 
   const setField = <K extends keyof Production>(key: K, value: Production[K]) => {
     setForm((current) => ({ ...current, [key]: value }));
   };
 
+  const handleCreateProject = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError(null);
+    if (!newPdfFile) {
+      setError("Selecciona el PDF de la obra para crear el proyecto.");
+      return;
+    }
+    if (!isPdf(newPdfFile)) {
+      setError("El archivo seleccionado no es un PDF válido.");
+      return;
+    }
+
+    const project: Production = {
+      ...form,
+      id: crypto.randomUUID(),
+      title: form.title.trim(),
+      subtitle: form.subtitle.trim(),
+      venue: form.venue.trim(),
+      summary: form.summary.trim(),
+      lastUpdated: new Date().toISOString(),
+      departments: technicalDepartments.map((name) => ({
+        id: crypto.randomUUID(),
+        name,
+        responsable: "",
+        notes: [],
+      })),
+      scenes: [],
+      team: form.team ?? createEmptyProjectTeam(),
+    };
+
+    try {
+      await createProductionWithPdf(project, newPdfFile.name, newPdfFile);
+      const nextProjects = await getProductions();
+      setProjects(nextProjects);
+      setForm(cloneProduction(project));
+      setSelectedProjectId(project.id);
+      setIsCreating(false);
+      setNewPdfFile(null);
+      setPdfDocument(await getScriptDocument(project.id) ?? null);
+      setSaveState("saved");
+    } catch (saveError) {
+      console.error(saveError);
+      setError("No se pudo crear el proyecto y guardar su PDF.");
+    }
+  };
+
+  const handleReplacePdf = async (file: File | undefined) => {
+    if (!file || !form.id) return;
+    if (!isPdf(file)) {
+      setError("El archivo seleccionado no es un PDF válido.");
+      return;
+    }
+    if (pdfDocument && !window.confirm(
+      "Reemplazar el PDF eliminará las etiquetas del libreto y los cues asociados a ese documento. ¿Quieres continuar?",
+    )) {
+      return;
+    }
+
+    setIsSavingPdf(true);
+    setError(null);
+    try {
+      const document = await saveScriptDocument(form.id, file.name, file);
+      setPdfDocument(document);
+      setSaveState("saved");
+    } catch (saveError) {
+      console.error(saveError);
+      setError("No se pudo guardar el PDF en este proyecto.");
+    } finally {
+      setIsSavingPdf(false);
+    }
+  };
+
+  const handleDeleteProject = async (project: Production) => {
+    if (!window.confirm(`Se eliminarán “${project.title}” y su PDF, cues y etiquetas. ¿Quieres continuar?`)) {
+      return;
+    }
+
+    try {
+      await deleteProduction(project.id);
+      const nextProjects = await getProductions();
+      setProjects(nextProjects);
+      const nextActiveProject = nextProjects[0];
+      if (nextActiveProject) {
+        await selectProject(nextActiveProject, project.id !== form.id);
+      } else {
+        setSelectedProjectId("");
+        setForm(createBlankProduction());
+        setPdfDocument(null);
+        setIsCreating(false);
+      }
+      setError(null);
+    } catch (deleteError) {
+      console.error(deleteError);
+      setError("No se pudo eliminar el proyecto.");
+    }
+  };
+
+  const handleDeleteAllProjects = async () => {
+    if (!window.confirm(
+      `Se eliminarán los ${projects.length} proyectos guardados y todos sus PDF, cues, etiquetas y datos de función. Esta acción no se puede deshacer. ¿Quieres continuar?`,
+    )) {
+      return;
+    }
+
+    try {
+      await deleteAllProductions();
+      setProjects([]);
+      setSelectedProjectId("");
+      setForm(createBlankProduction());
+      setPdfDocument(null);
+      setIsCreating(false);
+      setSaveState("idle");
+      setError(null);
+    } catch (deleteError) {
+      console.error(deleteError);
+      setError("No se pudieron eliminar todos los proyectos.");
+    }
+  };
+
+  const handleTeamChange = (team: NonNullable<Production["team"]>) => {
+    setForm((current) => ({
+      ...current,
+      team,
+      departments: current.departments.map((department) => {
+        const teamDepartment = team.technical.find((item) => item.department === department.name);
+        return teamDepartment ? { ...department, responsable: teamDepartment.head } : department;
+      }),
+    }));
+  };
+
+  const isSelectedPdfFile = newPdfFile ?? null;
+
   return (
-    <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-      <Card className="border-slate-800 bg-slate-900/80">
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Producciones</p>
-            <h2 className="mt-2 text-xl font-semibold text-white">Listado</h2>
-          </div>
-          <div className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2.5 py-1 text-xs text-cyan-300">
-            {projects.length} activos
-          </div>
-        </div>
+    <div className="space-y-4">
+      {error && (
+        <p role="alert" className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+          {error}
+        </p>
+      )}
 
-        <div className="space-y-3">
-          {projects.map((project) => (
-            <div key={project.id} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-xs uppercase tracking-[0.15em] text-slate-400">{project.status}</p>
-                  <h3 className="mt-2 text-lg font-semibold text-white">{project.title}</h3>
-                  <p className="mt-1 text-sm text-slate-300">{project.venue}</p>
-                </div>
-                <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-[10px] uppercase tracking-[0.15em] text-emerald-300">
-                  {project.syncStatus}
-                </span>
-              </div>
+      <div className="grid gap-6 xl:grid-cols-[0.8fr_1.2fr]">
+        <Card className="border-slate-800 bg-slate-900/80">
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-xs uppercase tracking-[0.16em] text-slate-400">Archivo de obras</p>
+              <h2 className="mt-1 text-xl font-semibold text-white">Proyectos</h2>
+            </div>
+            <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-200">
+              {projects.length}
+            </span>
+          </div>
 
-              <div className="mt-4 flex items-center gap-2">
-                <Button type="button" onClick={() => handleEdit(project)} className="border-slate-700 bg-slate-900 text-slate-100">
-                  Editar
+          {projects.length === 0 ? (
+            <div className="flex min-h-64 flex-col items-center justify-center rounded-xl border border-dashed border-slate-700 bg-slate-950/60 p-6 text-center">
+              <FolderOpen className="h-9 w-9 text-slate-500" />
+              <h3 className="mt-4 text-lg font-semibold text-white">Aún no hay proyectos</h3>
+              <p className="mt-2 max-w-xs text-sm leading-6 text-slate-400">
+                Crea una obra y añade su PDF para empezar a preparar el libreto y el equipo.
+              </p>
+              <Button
+                type="button"
+                onClick={beginNewProject}
+                className="mt-5 border-cyan-400/40 bg-cyan-400 text-slate-950 hover:border-cyan-300 hover:bg-cyan-300"
+              >
+                <Plus className="mr-2 h-4 w-4" />
+                Crear proyecto
+              </Button>
+            </div>
+          ) : (
+            <>
+              <ul className="space-y-2">
+                {projects.map((project) => {
+                  const isSelected = project.id === selectedProjectId;
+                  return (
+                    <li key={project.id}>
+                      <div className={`rounded-xl border p-3 ${
+                        isSelected
+                          ? "border-cyan-400/50 bg-cyan-500/5"
+                          : "border-slate-800 bg-slate-950"
+                      }`}>
+                        <button
+                          type="button"
+                          onClick={() => void selectProject(project)}
+                          aria-pressed={isSelected}
+                          className="w-full text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+                        >
+                          <span className="flex items-start justify-between gap-3">
+                            <span className="min-w-0">
+                              <span className="block truncate font-semibold text-white">{project.title}</span>
+                              <span className="mt-1 block truncate text-sm text-slate-400">
+                                {[project.subtitle, project.venue].filter(Boolean).join(" · ") || "Sin temporada ni sala"}
+                              </span>
+                            </span>
+                            {isSelected && <Check className="h-4 w-4 shrink-0 text-cyan-300" />}
+                          </span>
+                        </button>
+                        <div className="mt-3 flex items-center justify-between gap-3">
+                          <span className="inline-flex items-center gap-1.5 text-xs text-slate-400">
+                            <FileText className="h-3.5 w-3.5" />
+                            {project.id === form.id && pdfDocument ? "PDF cargado" : "Obra"}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteProject(project)}
+                            aria-label={`Eliminar ${project.title}`}
+                            className="rounded-md p-1.5 text-slate-500 hover:bg-rose-500/10 hover:text-rose-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-rose-300"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+
+              <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-800 pt-4">
+                <Button type="button" onClick={beginNewProject} className="border-slate-700 bg-slate-900">
+                  <Plus className="mr-2 h-4 w-4" />
+                  Crear proyecto
                 </Button>
-                <Button type="button" onClick={() => void handleDelete(project.id)} className="border-rose-500/20 bg-rose-500/10 text-rose-200">
+                <Button
+                  type="button"
+                  onClick={() => void handleDeleteAllProjects()}
+                  className="border-rose-500/30 bg-rose-500/5 text-rose-200 hover:border-rose-400 hover:bg-rose-500/10"
+                >
                   <Trash2 className="mr-2 h-4 w-4" />
-                  Eliminar
+                  Eliminar todos
+                </Button>
+              </div>
+            </>
+          )}
+        </Card>
+
+        {projects.length > 0 || isCreating ? (
+          <Card className="border-slate-800 bg-slate-900/80">
+            <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.16em] text-slate-400">Editor del proyecto</p>
+                <h2 className="mt-1 text-xl font-semibold text-white">
+                  {isCreating ? "Nuevo proyecto" : form.title || "Proyecto sin título"}
+                </h2>
+              </div>
+              <div className="flex items-center gap-2">
+                {!isCreating && (
+                  <span role="status" className="inline-flex items-center gap-1.5 text-xs text-slate-400">
+                    {saveState === "saving" ? (
+                      "Guardando…"
+                    ) : saveState === "saved" ? (
+                      <><Check className="h-3.5 w-3.5 text-emerald-300" /> Guardado</>
+                    ) : saveState === "error" ? (
+                      "Error al guardar"
+                    ) : (
+                      "Guardado automático"
+                    )}
+                  </span>
+                )}
+                <Button
+                  type="button"
+                  onClick={() => setIsTeamOpen(true)}
+                  disabled={!form.id && !isCreating}
+                  className="border-cyan-500/30 bg-cyan-500/10 text-cyan-200"
+                >
+                  <Users className="mr-2 h-4 w-4" />
+                  Equipo
                 </Button>
               </div>
             </div>
-          ))}
-        </div>
-      </Card>
 
-      <Card className="border-slate-800 bg-slate-900/80">
-        <div className="mb-4 flex items-center gap-2 text-cyan-300">
-          <FolderOpen className="h-5 w-5" />
-          <span className="text-xs uppercase tracking-[0.2em]">Editor</span>
-        </div>
+            <form onSubmit={handleCreateProject} className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="space-y-1.5 text-sm text-slate-300">
+                  <span>Nombre de la obra <span className="text-rose-300">*</span></span>
+                  <input
+                    required
+                    value={form.title}
+                    onChange={(event) => setField("title", event.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none focus:border-cyan-400"
+                    placeholder="Ej.: La casa de Bernarda Alba"
+                  />
+                </label>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="grid gap-4 md:grid-cols-2">
-            <label className="space-y-2 text-sm text-slate-300">
-              <span>Título</span>
-              <input
-                value={form.title}
-                onChange={(event) => setField("title", event.target.value)}
-                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none ring-0 placeholder:text-slate-500"
-                placeholder="Ej: La casa de Bernarda Alba"
-              />
-            </label>
+                <label className="space-y-1.5 text-sm text-slate-300">
+                  <span>Temporada</span>
+                  <input
+                    value={form.subtitle}
+                    onChange={(event) => setField("subtitle", event.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none focus:border-cyan-400"
+                    placeholder="Ej.: Temporada 2026"
+                  />
+                </label>
 
-            <label className="space-y-2 text-sm text-slate-300">
-              <span>Temporada</span>
-              <input
-                value={form.subtitle}
-                onChange={(event) => setField("subtitle", event.target.value)}
-                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none placeholder:text-slate-500"
-                placeholder="Ej: Temporada 2026"
-              />
-            </label>
-          </div>
+                <label className="space-y-1.5 text-sm text-slate-300">
+                  <span>Localidad / sala</span>
+                  <input
+                    value={form.venue}
+                    onChange={(event) => setField("venue", event.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none focus:border-cyan-400"
+                    placeholder="Nombre de la sala"
+                  />
+                </label>
 
-          <div className="grid gap-4 md:grid-cols-2">
-            <label className="space-y-2 text-sm text-slate-300">
-              <span>Localidad / sala</span>
-              <input
-                value={form.venue}
-                onChange={(event) => setField("venue", event.target.value)}
-                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none placeholder:text-slate-500"
-                placeholder="Teatro Principal"
-              />
-            </label>
+                {!isCreating && (
+                  <label className="space-y-1.5 text-sm text-slate-300">
+                    <span>Estado</span>
+                    <select
+                      value={form.status}
+                      onChange={(event) => setField("status", event.target.value as Production["status"])}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none focus:border-cyan-400"
+                    >
+                      <option value="Activa">Activa</option>
+                      <option value="Archivada">Archivada</option>
+                    </select>
+                  </label>
+                )}
+              </div>
 
-            <label className="space-y-2 text-sm text-slate-300">
-              <span>Estado</span>
-              <select
-                value={form.status}
-                onChange={(event) => setField("status", event.target.value as Production["status"])}
-                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none"
-              >
-                <option value="Activa">Activa</option>
-                <option value="Archivada">Archivada</option>
-              </select>
-            </label>
-          </div>
+              <label className="block space-y-1.5 text-sm text-slate-300">
+                <span>Resumen</span>
+                <textarea
+                  value={form.summary}
+                  onChange={(event) => setField("summary", event.target.value)}
+                  className="min-h-24 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none focus:border-cyan-400"
+                  placeholder="Contexto de la producción"
+                />
+              </label>
 
-          <label className="block space-y-2 text-sm text-slate-300">
-            <span>Resumen</span>
-            <textarea
-              value={form.summary}
-              onChange={(event) => setField("summary", event.target.value)}
-              className="min-h-28 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none placeholder:text-slate-500"
-              placeholder="Describe la producción y su contexto técnico."
-            />
-          </label>
+              <section className="rounded-xl border border-slate-800 bg-slate-950 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span className="rounded-lg bg-slate-800 p-2 text-cyan-300">
+                      <FileText className="h-5 w-5" />
+                    </span>
+                    <div className="min-w-0">
+                      <h3 className="font-medium text-white">PDF de la obra</h3>
+                      <p className="truncate text-xs text-slate-400">
+                        {isCreating
+                          ? isSelectedPdfFile?.name ?? "Es necesario para crear el proyecto."
+                          : pdfDocument?.fileName ?? "Aún no hay un PDF vinculado."}
+                      </p>
+                    </div>
+                  </div>
+                  {isCreating ? (
+                    <Button
+                      type="button"
+                      onClick={() => createPdfInputRef.current?.click()}
+                      className="border-slate-700 bg-slate-900"
+                    >
+                      <Upload className="mr-2 h-4 w-4" />
+                      Elegir PDF
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      onClick={() => {
+                        replacePdfInputRef.current?.click();
+                      }}
+                      disabled={isSavingPdf}
+                      className="border-slate-700 bg-slate-900"
+                    >
+                      <Upload className="mr-2 h-4 w-4" />
+                      {isSavingPdf ? "Guardando PDF…" : pdfDocument ? "Reemplazar PDF" : "Añadir PDF"}
+                    </Button>
+                  )}
+                  <input
+                    ref={createPdfInputRef}
+                    type="file"
+                    accept="application/pdf,.pdf"
+                    className="sr-only"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] ?? null;
+                      setNewPdfFile(file);
+                      setError(file && !isPdf(file) ? "El archivo seleccionado no es un PDF válido." : null);
+                      event.target.value = "";
+                    }}
+                  />
+                  <input
+                    ref={replacePdfInputRef}
+                    type="file"
+                    accept="application/pdf,.pdf"
+                    className="sr-only"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      void handleReplacePdf(file);
+                      event.target.value = "";
+                    }}
+                  />
+                </div>
+              </section>
 
-          <div className="flex items-center gap-2 text-sm text-slate-300">
-            <UserRound className="h-4 w-4 text-cyan-300" />
-            Departamentos: {form.departments.length}
-          </div>
+              <div className="flex flex-wrap items-center gap-3 border-t border-slate-800 pt-4">
+                {isCreating ? (
+                  <>
+                    <Button
+                      type="submit"
+                      disabled={!newPdfFile}
+                      className="border-cyan-400/40 bg-cyan-400 text-slate-950 hover:border-cyan-300 hover:bg-cyan-300"
+                    >
+                      <Save className="mr-2 h-4 w-4" />
+                      Crear proyecto
+                    </Button>
+                    <Button
+                      type="button"
+                      onClick={() => {
+                        setIsCreating(false);
+                        if (projects[0]) void selectProject(projects[0], false);
+                        else setForm(createBlankProduction());
+                      }}
+                      className="border-slate-700 bg-slate-900"
+                    >
+                      Cancelar
+                    </Button>
+                  </>
+                ) : (
+                  <p className="text-xs text-slate-500">
+                    Los cambios se guardan automáticamente en este proyecto.
+                  </p>
+                )}
+              </div>
+            </form>
+          </Card>
+        ) : null}
+      </div>
 
-          <div className="flex items-center gap-3 pt-2">
-            <Button type="submit" className="border-cyan-500/30 bg-cyan-500/10 text-cyan-200">
-              <Save className="mr-2 h-4 w-4" />
-              Guardar producción
-            </Button>
-            <Button
-              type="button"
-              onClick={() => setForm(emptyProduction)}
-              className="border-slate-700 bg-slate-900 text-slate-100"
-            >
-              Nuevo
-            </Button>
-          </div>
-        </form>
-      </Card>
+      {isTeamOpen && (
+        <ProjectTeamDialog
+          team={form.team ?? createEmptyProjectTeam()}
+          onChange={handleTeamChange}
+          onClose={() => setIsTeamOpen(false)}
+        />
+      )}
     </div>
   );
 }
