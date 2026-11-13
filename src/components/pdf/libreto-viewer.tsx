@@ -15,11 +15,13 @@ import {
 import * as pdfjsLib from "pdfjs-dist";
 
 import { Card } from "@/components/ui/card";
+import { CueTypeBadge } from "@/components/cues/cue-type-badge";
 import {
   cueComponentOptions,
   cueDepartmentByType,
   cueTypeOptions,
   getCueColorClasses,
+  getCueMixedColorStyle,
 } from "@/lib/cue-presentation";
 import {
   getCueIdentifierPattern,
@@ -60,10 +62,24 @@ function getCategoryLabel(category: ScriptLabelCategory): string {
   return "Cue";
 }
 
-function getMarkerColor(category: ScriptLabelCategory, cueType?: CueType): string {
-  if (category === "act") return "border-violet-300 bg-violet-600 text-white";
-  if (category === "scene") return "border-amber-300 bg-amber-500 text-slate-950";
-  return getCueColorClasses(cueType ?? "LX");
+function getMarkerColor(
+  category: ScriptLabelCategory,
+  cueType?: CueType,
+  includedTypes?: readonly CueComponentType[],
+) {
+  if (category === "act") {
+    return { className: "border-violet-300 bg-violet-600 text-white", style: undefined };
+  }
+  if (category === "scene") {
+    return { className: "border-amber-300 bg-amber-500 text-slate-950", style: undefined };
+  }
+
+  const type = cueType ?? "LX";
+  const style = getCueMixedColorStyle(type, includedTypes);
+  return {
+    className: `${getCueColorClasses(type)} ${style ? "border-white/70" : ""}`,
+    style,
+  };
 }
 
 const hiddenLabelDepartments = new Set<DepartmentName>([
@@ -542,11 +558,20 @@ export function LibretoViewer() {
       }}
       className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left ${
         label.category === "cue"
-          ? getCueColorClasses(label.cueType ?? "LX")
+          ? `${getCueColorClasses(label.cueType ?? "LX")} ${
+              getCueMixedColorStyle(label.cueType ?? "LX", label.includedTypes)
+                ? "border-white/70"
+                : ""
+            }`
           : selectedLabelId === label.id
             ? "border-cyan-400/50 bg-cyan-500/10"
             : "border-slate-800 bg-slate-900 hover:border-slate-600"
       } ${selectedLabelId === label.id ? "ring-2 ring-cyan-300" : ""}`}
+      style={
+        label.category === "cue"
+          ? getCueMixedColorStyle(label.cueType ?? "LX", label.includedTypes)
+          : undefined
+      }
     >
       <span className={`min-w-0 truncate text-sm ${label.category === "cue" && (label.cueType === "LX" || label.cueType === "PREVENIR") ? "text-slate-950" : "text-slate-200"}`}>
         {label.category === "cue"
@@ -682,26 +707,41 @@ export function LibretoViewer() {
                     className="block h-auto w-full cursor-crosshair rounded-lg border border-slate-300 bg-white"
                   />
                   <div className="pointer-events-none absolute inset-0">
-                    {labelsOnPage.map((label) => (
+                    {labelsOnPage.map((label) => {
+                      const markerColor = getMarkerColor(
+                        label.category,
+                        label.cueType,
+                        label.includedTypes,
+                      );
+                      return (
                       <button
                         key={label.id}
                         type="button"
-                        aria-label={`${getCategoryLabel(label.category)}: ${label.title}`}
+                        aria-label={`${getCategoryLabel(label.category)}: ${label.title}${
+                          label.category === "cue" && label.includedTypes?.length
+                            ? ` · ${label.includedTypes.join(" + ")}`
+                            : ""
+                        }`}
                         title={`${getCategoryLabel(label.category)} · ${label.title}`}
                         onClick={() => {
                           setClickedPoint(null);
                           setSelectedLabelId(label.id);
                         }}
-                        className={`pointer-events-auto absolute max-w-36 -translate-x-1/2 -translate-y-1/2 truncate rounded-full border px-2 py-1 text-[10px] font-bold shadow-lg ${getMarkerColor(label.category, label.cueType)} ${
+                        className={`pointer-events-auto absolute max-w-36 -translate-x-1/2 -translate-y-1/2 truncate rounded-full border px-2 py-1 text-[10px] font-bold shadow-lg ${markerColor.className} ${
                           selectedLabelId === label.id ? "ring-2 ring-white ring-offset-2 ring-offset-slate-900" : ""
                         }`}
-                        style={{ left: `${label.x * 100}%`, top: `${label.y * 100}%` }}
+                        style={{
+                          left: `${label.x * 100}%`,
+                          top: `${label.y * 100}%`,
+                          ...markerColor.style,
+                        }}
                       >
                         {label.category === "cue"
                           ? `${label.cueIdentifier ?? `${label.cueType ?? "CUE"}-…`}${label.cueType === "SIM" && label.includedTypes?.length ? ` · ${label.includedTypes.join("+")}` : ""}`
                           : `${label.category === "act" ? "ACT" : "ESC"} · ${label.title}`}
                       </button>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -875,8 +915,15 @@ export function LibretoViewer() {
                       aria-pressed={category === "cue" && cueType === option.value}
                       onClick={() => void handleCueTypeSelect(option.value)}
                       className={`rounded-lg border px-2 py-2 text-left text-xs font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300 ${getCueColorClasses(option.value)} ${
+                        option.value === "SIM" ? "border-white/70" : ""
+                      } ${
                         category === "cue" && cueType === option.value ? "ring-2 ring-white" : ""
                       }`}
+                      style={
+                        option.value === "SIM"
+                          ? getCueMixedColorStyle(option.value, includedTypes)
+                          : undefined
+                      }
                     >
                       {option.label}
                     </button>
@@ -889,7 +936,14 @@ export function LibretoViewer() {
                   {category === "cue" && (
                     <>
                       <p className="text-sm text-slate-300">
-                        Tipo seleccionado: <span className={`ml-1 inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold ${getCueColorClasses(cueType)}`}>{cueType}</span>
+                        Tipo seleccionado:{" "}
+                        <CueTypeBadge
+                          type={cueType}
+                          includedTypes={cueType === "SIM" ? includedTypes : undefined}
+                          className="ml-1 px-2 py-0.5"
+                        >
+                          {cueType}
+                        </CueTypeBadge>
                       </p>
                       <label className="block space-y-1.5 text-sm text-slate-300">
                         <span>Identificador</span>
@@ -910,7 +964,7 @@ export function LibretoViewer() {
                       </label>
                       {cueType === "PREVENIR" && (
                         <p className="rounded-lg border border-orange-400/30 bg-orange-500/10 px-3 py-2 text-xs text-orange-200">
-                          Este aviso naranja puede compartir el identificador de su MOV y no incrementa su numeración.
+                          Este aviso usa el prefijo PREV, puede compartir el número de su MOV y no incrementa su numeración.
                         </p>
                       )}
                     </>
@@ -987,10 +1041,14 @@ export function LibretoViewer() {
               <p className="text-xs uppercase tracking-[0.15em] text-slate-400">
                 {getCategoryLabel(selectedLabel.category)} · Página {selectedLabel.page}
               </p>
-              {selectedLabel.cueType === "PREVENIR" && (
-                <span className={`mt-2 inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${getCueColorClasses("PREVENIR")}`}>
-                  PREVENIR
-                </span>
+              {selectedLabel.category === "cue" && selectedLabel.cueType && (
+                <CueTypeBadge
+                  type={selectedLabel.cueType}
+                  includedTypes={selectedLabel.includedTypes}
+                  className="mt-2"
+                >
+                  {selectedLabel.cueType}
+                </CueTypeBadge>
               )}
               <p className="mt-2 font-medium text-white">
                 {selectedLabel.cueIdentifier ? `${selectedLabel.cueIdentifier} · ` : ""}

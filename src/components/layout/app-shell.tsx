@@ -8,7 +8,7 @@ import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { getProductions } from "@/lib/data-service";
-import { navigation } from "@/lib/mock-data";
+import { navigation } from "@/lib/navigation";
 import { cn } from "@/lib/utils";
 import type { Production } from "@/lib/types";
 import { useUiStore } from "@/store/ui-store";

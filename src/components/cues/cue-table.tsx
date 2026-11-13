@@ -1,8 +1,7 @@
 import { AlarmClockCheck, Eye, Wrench } from "lucide-react";
 
-import { cues } from "@/lib/mock-data";
+import { CueTypeBadge } from "@/components/cues/cue-type-badge";
 import type { Cue } from "@/lib/types";
-import { getCueColorClasses } from "@/lib/cue-presentation";
 
 import { Card } from "@/components/ui/card";
 
@@ -13,7 +12,7 @@ const statusClasses: Record<Cue["status"], string> = {
   Pendiente: "bg-rose-500/15 text-rose-300",
 };
 
-export function CueTable() {
+export function CueTable({ cues }: { cues: Cue[] }) {
   return (
     <Card className="border-slate-800 bg-slate-900/70">
       <div className="mb-4 flex items-center justify-between">
@@ -39,17 +38,23 @@ export function CueTable() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800 bg-slate-900/50">
-            {cues.map((cue) => (
+            {cues.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="px-4 py-6 text-sm text-slate-400">
+                  No hay cues para mostrar.
+                </td>
+              </tr>
+            ) : cues.map((cue) => (
               <tr key={cue.id} className="hover:bg-slate-900/90">
                 <td className="px-4 py-3 font-medium text-white">
-                  <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${getCueColorClasses(cue.type)}`}>
+                  <CueTypeBadge type={cue.type} includedTypes={cue.includedTypes}>
                     {cue.identifier}
-                  </span>
+                  </CueTypeBadge>
                 </td>
                 <td className="px-4 py-3">
-                  <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${getCueColorClasses(cue.type)}`}>
+                  <CueTypeBadge type={cue.type} includedTypes={cue.includedTypes}>
                     {cue.type}
-                  </span>
+                  </CueTypeBadge>
                   {cue.type === "SIM" && cue.includedTypes && (
                     <span className="ml-2 text-xs text-green-200">{cue.includedTypes.join(" + ")}</span>
                   )}

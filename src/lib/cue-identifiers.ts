@@ -1,6 +1,12 @@
 import type { CueType } from "@/lib/types";
 
-export function getCueIdentifierType(type: CueType): CueType {
+export type CueIdentifierPrefix = Exclude<CueType, "PREVENIR"> | "PREV";
+
+export function getCueIdentifierType(type: CueType): CueIdentifierPrefix {
+  return type === "PREVENIR" ? "PREV" : type;
+}
+
+export function getCueIdentifierSequenceType(type: CueType): CueType {
   return type === "PREVENIR" ? "MOV" : type;
 }
 

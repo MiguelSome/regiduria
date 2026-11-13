@@ -53,6 +53,32 @@ class RegiduriaDb extends Dexie {
           transaction.table("scriptLabels").where("productionId").anyOf(seedProjectIds).delete(),
         ]);
       });
+    this.version(4)
+      .stores({
+        productions: "id, title, status, syncStatus",
+        cues: "id, productionId, identifier, status, executionState, scriptDocumentId",
+        incidents: "id, productionId, date, status",
+        performances: "id, productionId, date, title",
+        scriptDocuments: "id, productionId",
+        scriptLabels: "id, documentId, category, page, cueId, productionId",
+      })
+      .upgrade(async (transaction) => {
+        await transaction.table("cues").toCollection().modify((cue: Cue) => {
+          if (cue.type === "PREVENIR") {
+            cue.identifier = cue.identifier.replace(/^MOV(?=-)/i, "PREV");
+          }
+        });
+        await transaction.table("scriptLabels").toCollection().modify((label: ScriptLabel) => {
+          if (label.cueType === "PREVENIR") {
+            if (label.cueIdentifier) {
+              label.cueIdentifier = label.cueIdentifier.replace(/^MOV(?=-)/i, "PREV");
+            }
+            if (label.cueIdentifierOverride) {
+              label.cueIdentifierOverride = label.cueIdentifierOverride.replace(/^MOV(?=-)/i, "PREV");
+            }
+          }
+        });
+      });
   }
 }
 

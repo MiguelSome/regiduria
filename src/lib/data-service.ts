@@ -2,7 +2,7 @@ import { regiduriaDb } from "@/lib/db";
 import { cueDepartmentByType } from "@/lib/cue-presentation";
 import {
   getCueIdentifierNumber,
-  getCueIdentifierType,
+  getCueIdentifierSequenceType,
   getNextCueIdentifier,
 } from "@/lib/cue-identifiers";
 import { cueSchema, incidentSchema, productionSchema, scriptLabelSchema } from "@/lib/schemas";
@@ -48,7 +48,7 @@ function assignDocumentCueIdentifiers(
 
     // Keep existing non-PDF cue numbers stable and number script cues after them.
     const overrideIdentifier = label.cueIdentifierOverride?.trim();
-    const identifierType = getCueIdentifierType(label.cueType);
+    const identifierType = getCueIdentifierSequenceType(label.cueType);
     let identifier: string;
     if (overrideIdentifier) {
       identifier = overrideIdentifier;

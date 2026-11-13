@@ -1,27 +1,46 @@
-export type CueType =
-  | "LX"
-  | "SON"
-  | "MOV"
-  | "PREVENIR"
-  | "PROY"
-  | "ENT/MUT"
-  | "UT"
-  | "SIM"
-  | "AVISO"
-  | "VEST";
-export type CueComponentType = Exclude<CueType, "SIM" | "PREVENIR">;
+// Single source of truth for the domain lists. Types and Zod schemas are built from these arrays.
+export const DEPARTMENT_NAMES = [
+  "Iluminación",
+  "Sonido",
+  "Maquinaria",
+  "Utilería",
+  "Vestuario",
+  "Caracterización",
+  "Vídeo",
+  "Regiduría",
+  "Reparto",
+] as const;
+
+export const CUE_TYPES = [
+  "LX",
+  "SON",
+  "MOV",
+  "PREVENIR",
+  "PROY",
+  "ENT/MUT",
+  "UT",
+  "SIM",
+  "AVISO",
+  "VEST",
+] as const;
+
+// Types that can be combined inside a SIM cue: every cue type except SIM and PREVENIR.
+export const CUE_COMPONENT_TYPES = [
+  "LX",
+  "SON",
+  "MOV",
+  "PROY",
+  "ENT/MUT",
+  "UT",
+  "AVISO",
+  "VEST",
+] as const satisfies readonly CueType[];
+
+export type CueType = (typeof CUE_TYPES)[number];
+export type CueComponentType = (typeof CUE_COMPONENT_TYPES)[number];
 export type ScriptLabelCategory = "act" | "scene" | "cue";
 export type CueStatus = "Borrador" | "Preparado" | "Ejecutado" | "Pendiente";
-export type DepartmentName =
-  | "Iluminación"
-  | "Sonido"
-  | "Maquinaria"
-  | "Utilería"
-  | "Vestuario"
-  | "Caracterización"
-  | "Vídeo"
-  | "Regiduría"
-  | "Reparto";
+export type DepartmentName = (typeof DEPARTMENT_NAMES)[number];
 
 export type SyncStatus = "Sincronizado" | "Pendiente" | "Conflicto";
 
@@ -150,12 +169,15 @@ export interface PerformanceQuickIncident {
 }
 
 export interface PerformanceRunReport {
+  // Opening of the performance record. Cues can be launched before the timer starts.
   startedAt: string;
   endedAt?: string;
   durationMs: number;
   launchedCueCount: number;
   breaks: PerformanceBreak[];
   quickIncidents: PerformanceQuickIncident[];
+  // First time the timer was started. Optional: older records have no timer start.
+  timerStartedAt?: string;
 }
 
 export interface Performance {

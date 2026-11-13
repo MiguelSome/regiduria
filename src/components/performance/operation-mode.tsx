@@ -14,6 +14,7 @@ import {
 
 import { Card } from "@/components/ui/card";
 import { ScriptPagePreview } from "@/components/pdf/script-page-preview";
+import { CueTypeBadge } from "@/components/cues/cue-type-badge";
 import {
   getCuesByProduction,
   getProductions,
@@ -21,9 +22,16 @@ import {
   getScriptLabels,
   savePerformance,
 } from "@/lib/data-service";
-import { getCueColorClasses } from "@/lib/cue-presentation";
+import {
+  applyCueLaunch,
+  buildPerformanceRecord,
+  canLaunchNextCue,
+  isOpenRecord,
+  startTimerInReport,
+} from "@/lib/performance-run";
 import type {
   Cue,
+  CueComponentType,
   CueType,
   Performance,
   Production,
@@ -38,7 +46,7 @@ const launchActionByType: Partial<Record<CueType, string>> = {
   UT: "Cambio",
   SON: "Pincha",
   PROY: "Pincha",
-  SIM: "TOP",
+  PREVENIR: "Prevenido",
 };
 
 type TimerState = "idle" | "running" | "paused" | "finished";
@@ -60,7 +68,16 @@ const departmentChecks: { key: PreparationCheckKey; label: string }[] = [
   { key: "props", label: "Utilería" },
 ];
 
-function getLaunchActionLabel(type: CueType): string {
+function getLaunchActionLabel(
+  type: CueType,
+  includedTypes?: readonly CueComponentType[],
+): string {
+  if (type === "SIM") {
+    return includedTypes?.some((includedType) => includedType === "MOV" || includedType === "UT")
+      ? "TOP"
+      : "Go";
+  }
+
   return launchActionByType[type] ?? "Lanzar";
 }
 
@@ -125,15 +142,6 @@ function getElapsedAt(
   return elapsedBeforeRun + (runStartedAt === null ? 0 : timestamp - runStartedAt);
 }
 
-function formatLocalDate(timestamp: number): string {
-  const date = new Date(timestamp);
-  return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0"),
-  ].join("-");
-}
-
 function formatCountdown(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = seconds % 60;
@@ -185,6 +193,7 @@ export function OperationMode() {
     elapsedMs: number;
   } | null>(null);
   const [isStartingFunction, setIsStartingFunction] = useState(false);
+  const [isLaunchingCue, setIsLaunchingCue] = useState(false);
   const [isSavingQuickIncident, setIsSavingQuickIncident] = useState(false);
   const [tecMode, setTecMode] = useState(false);
   const [activeTab, setActiveTab] = useState<OperationTab>("operation");
@@ -209,6 +218,7 @@ export function OperationMode() {
   const performanceRecordRef = useRef<Performance | null>(null);
   const performanceSaveQueue = useRef<Promise<void>>(Promise.resolve());
   const isStartingFunctionRef = useRef(false);
+  const isLaunchingRef = useRef(false);
   const launchButtonRef = useRef<HTMLButtonElement | null>(null);
   const preparationAlertDeadline = useRef<number | null>(null);
 
@@ -323,7 +333,7 @@ export function OperationMode() {
   }, [preparationAlertState]);
 
   useEffect(() => {
-    if (!tecMode || timerState !== "running") return;
+    if (!tecMode || timerState === "finished") return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target;
@@ -408,6 +418,7 @@ export function OperationMode() {
     if (
       timerState !== "idle" ||
       isStartingFunctionRef.current ||
+      isLaunchingRef.current ||
       !selectedProduction ||
       !cues?.length
     ) {
@@ -416,47 +427,34 @@ export function OperationMode() {
 
     isStartingFunctionRef.current = true;
     setIsStartingFunction(true);
-    setProductionSelectionLocked(true);
     const now = Date.now();
-    const startedAt = new Date(now).toISOString();
-    const performance: Performance = {
-      id: crypto.randomUUID(),
-      productionId: selectedProduction.id,
-      title: selectedProduction.title,
-      date: formatLocalDate(now),
-      time: new Date(now).toLocaleTimeString("es-ES", {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      }),
-      prepared: 0,
-      total: cues.length,
-      notes: [],
-      runReport: {
-        startedAt,
-        durationMs: 0,
-        launchedCueCount: 0,
-        breaks: [],
-        quickIncidents: [],
-      },
-    };
+    const previousPerformance = performanceRecordRef.current;
+    const openPerformance =
+      isOpenRecord(previousPerformance) &&
+      previousPerformance?.productionId === selectedProduction.id
+        ? previousPerformance
+        : null;
+    const hasOpenRecord = openPerformance !== null;
+    const basePerformance = openPerformance
+      ? openPerformance
+      : buildPerformanceRecord({ production: selectedProduction, totalCues: cues.length, now });
+    const performance = startTimerInReport({ performance: basePerformance, now });
+    if (!hasOpenRecord) setProductionSelectionLocked(true);
 
     const saved = await persistPerformance(performance);
     isStartingFunctionRef.current = false;
     setIsStartingFunction(false);
     if (!saved) {
       if (performanceRecordRef.current?.id === performance.id) {
-        performanceRecordRef.current = null;
+        performanceRecordRef.current = previousPerformance;
       }
-      setProductionSelectionLocked(false);
+      if (!hasOpenRecord) setProductionSelectionLocked(false);
       return;
     }
 
     runStartedAt.current = now;
     elapsedBeforeRun.current = 0;
-    launchedCountRef.current = 0;
     setElapsedMs(0);
-    setLaunchedCount(0);
     setTimerState("running");
     setActiveTab("operation");
   };
@@ -550,31 +548,96 @@ export function OperationMode() {
   };
 
   const handleLaunchCue = async () => {
-    if (timerState !== "running" || !cues) return;
-    const nextCount = Math.min(launchedCountRef.current + 1, cues.length);
+    // Synchronous guard: while a launch is being saved, further activations are
+    // ignored instead of queued (RF7). The button `disabled` state alone is not
+    // enough, because React state updates are asynchronous.
+    if (isLaunchingRef.current) return;
+
+    const cueCount = cues?.length ?? null;
+    const canLaunch = canLaunchNextCue({
+      cueCount,
+      launchedCueCount: launchedCountRef.current,
+      isTimerFinished: timerState === "finished",
+      isLaunching: isLaunchingRef.current,
+    });
+    if (!canLaunch || !selectedProduction || cueCount === null) return;
+
+    const nextCount = Math.min(launchedCountRef.current + 1, cueCount);
     if (nextCount === launchedCountRef.current) return;
 
-    const currentPerformance = performanceRecordRef.current;
-    if (!currentPerformance?.runReport) {
-      setRunSaveError("No se encontró el registro activo de esta función.");
+    isLaunchingRef.current = true;
+    setIsLaunchingCue(true);
+
+    const previousRecord = performanceRecordRef.current;
+    const isFirstLaunch = !previousRecord?.runReport;
+    const now = Date.now();
+    const elapsed = getElapsedAt(runStartedAt.current, elapsedBeforeRun.current, now);
+    const isFinished = nextCount === cueCount;
+
+    // Full reversal of a launch that cannot be completed. The snapshot taken
+    // before the launch is restored, so the counter and the warned cue are not
+    // touched, the timer keeps its state and the launch control becomes
+    // available again for a retry. Two cases share this reversal:
+    //
+    // - First launch (RF12, CL5): there was no record, so the snapshot is
+    //   `null` and no record is left behind. The production selection must not
+    //   stay locked.
+    // - Later launches (RF13, CL21): the snapshot is the record of the last
+    //   successful save, so the saved `launchedCueCount` and the record in
+    //   memory stay aligned and the production selection keeps its lock.
+    const revertFailedLaunch = () => {
+      performanceRecordRef.current = previousRecord;
+      if (isFirstLaunch) setProductionSelectionLocked(false);
+      isLaunchingRef.current = false;
+      setIsLaunchingCue(false);
+    };
+
+    let candidate: Performance;
+    try {
+      let base: Performance;
+      if (isFirstLaunch) {
+        // There is no open record yet: the launch opens it, even with the timer
+        // stopped, so that no launch is lost (RF5, RF17).
+        base = buildPerformanceRecord({ production: selectedProduction, totalCues: cueCount, now });
+      } else if (previousRecord) {
+        base = previousRecord;
+      } else {
+        throw new Error("Missing performance record for the cue launch");
+      }
+
+      candidate = applyCueLaunch({
+        performance: base,
+        launchedCueCount: nextCount,
+        elapsedMs: elapsed,
+        isFinished,
+        now,
+      });
+    } catch (buildError) {
+      // The record could not even be built, so nothing was saved (RF12).
+      console.error(buildError);
+      revertFailedLaunch();
+      setRunSaveError("No se pudo crear el registro de la función. Vuelve a intentar el lanzamiento.");
       return;
     }
 
-    const now = Date.now();
-    const elapsed = getElapsedAt(runStartedAt.current, elapsedBeforeRun.current, now);
-    const isFinished = nextCount === cues.length;
-    const updatedPerformance: Performance = {
-      ...currentPerformance,
-      runReport: {
-        ...currentPerformance.runReport,
-        durationMs: elapsed,
-        launchedCueCount: nextCount,
-        ...(isFinished ? { endedAt: new Date(now).toISOString() } : {}),
-      },
-    };
+    const saved = await persistPerformance(candidate);
+
+    if (!saved) {
+      // The save queue already reported the failure (RF12/RF13). Nothing was
+      // written, so the launch is undone and the record in memory goes back to
+      // the last consistent saved state: the counter stays at its previous
+      // value, the affected cue is still warned, the saved `launchedCueCount`
+      // is preserved and the launch can be retried without reloading (RF13).
+      revertFailedLaunch();
+      return;
+    }
+
+    // The production selection is locked as soon as the record exists (RF18).
+    if (isFirstLaunch) setProductionSelectionLocked(true);
 
     launchedCountRef.current = nextCount;
     setLaunchedCount(nextCount);
+
     if (isFinished) {
       runStartedAt.current = null;
       elapsedBeforeRun.current = elapsed;
@@ -582,7 +645,9 @@ export function OperationMode() {
       setTimerState("finished");
       setProductionSelectionLocked(false);
     }
-    await persistPerformance(updatedPerformance);
+
+    isLaunchingRef.current = false;
+    setIsLaunchingCue(false);
   };
 
   const handleProductionChange = useCallback((productionId: string) => {
@@ -679,6 +744,8 @@ export function OperationMode() {
   const nextCue = cues?.[launchedCount];
   const followingCues = cues?.slice(launchedCount + 1, launchedCount + 4) ?? [];
   const cueProgress = cues?.length ? Math.round((launchedCount / cues.length) * 100) : 0;
+  const isSequenceAvailable =
+    Boolean(selectedProductionId) && !cueLoadError && cues !== null && cues.length > 0;
   const canStartFunction = Boolean(selectedProductionId && cues?.length);
   const activeScriptCue = nextCue ?? cues?.[launchedCount - 1];
   const activeScriptCuePage = getCueScriptPage(activeScriptCue, scriptLabels);
@@ -831,6 +898,7 @@ export function OperationMode() {
                   disabled={
                     timerState === "finished" ||
                     isStartingFunction ||
+                    isLaunchingCue ||
                     breakStartedAt !== null ||
                     (timerState === "idle" && !canStartFunction)
                   }
@@ -1024,42 +1092,17 @@ export function OperationMode() {
                 Este espacio queda preparado para configurar los avisos al público.
               </p>
             </section>
-          ) : timerState === "idle" ? (
-            <section className="rounded-2xl border border-dashed border-slate-700 p-5 text-sm text-slate-400">
-              {!selectedProductionId
-                ? "Crea o selecciona una producción para preparar la función."
-                : cueLoadError
-                  ? cueLoadError
-                  : cues === null
-                    ? "Cargando cues de la producción…"
-                    : cues.length === 0
-                      ? "Esta producción no tiene cues para lanzar."
-                      : "Al iniciar el cronómetro aparecerá aquí la primera cue de la función."}
-            </section>
-          ) : (
+          ) : isSequenceAvailable ? (
             <section aria-label="Secuencia de cues" className="space-y-3">
               <div className="flex items-center justify-between gap-3">
                 <h3 className="font-semibold text-white">Secuencia de cues</h3>
                 <span className="text-xs text-slate-400">{launchedCount} / {cues?.length ?? "…"} lanzadas</span>
               </div>
 
-              {cueLoadError ? (
-                <p role="alert" className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200">
-                  {cueLoadError}
-                </p>
-              ) : cues === null ? (
-                <p role="status" className="rounded-xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-400">
-                  Cargando cues…
-                </p>
-              ) : cues.length === 0 ? (
-                <p className="rounded-xl border border-dashed border-slate-700 p-4 text-sm text-slate-400">
-                  No hay cues registradas para esta producción.
-                </p>
-              ) : (
-                <>
+              <>
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <p className="text-xs text-slate-400">
-                      {launchedCount} / {cues.length} lanzadas
+                      {launchedCount} / {cues?.length ?? 0} lanzadas
                     </p>
                     <button
                       type="button"
@@ -1090,9 +1133,13 @@ export function OperationMode() {
                       >
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
-                            <span className={`rounded-full border px-2 py-0.5 text-xs font-semibold ${getCueColorClasses(cue.type)}`}>
+                            <CueTypeBadge
+                              type={cue.type}
+                              includedTypes={cue.includedTypes}
+                              className="px-2 py-0.5"
+                            >
                               {cue.type}
-                            </span>
+                            </CueTypeBadge>
                             <span className="font-semibold text-white">{cue.identifier}</span>
                           </div>
                           <p className="mt-1 text-sm text-slate-300">{cue.description}</p>
@@ -1124,15 +1171,18 @@ export function OperationMode() {
                           )}
                         </div>
                         <span className="text-xs text-slate-400">
-                          Cue {launchedCount + 1} de {cues.length}
+                          Cue {launchedCount + 1} de {cues?.length ?? 0}
                         </span>
                       </div>
                       <div className="flex flex-wrap items-start justify-between gap-4">
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
-                            <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${getCueColorClasses(nextCue.type)}`}>
+                            <CueTypeBadge
+                              type={nextCue.type}
+                              includedTypes={nextCue.includedTypes}
+                            >
                               {nextCue.type}
-                            </span>
+                            </CueTypeBadge>
                             <h4 className="text-xl font-semibold text-white">{nextCue.identifier}</h4>
                           </div>
                           <p className="mt-2 text-sm leading-6 text-slate-300">{nextCue.description}</p>
@@ -1143,13 +1193,20 @@ export function OperationMode() {
                         <button
                           ref={launchButtonRef}
                           type="button"
-                          disabled={timerState !== "running"}
+                          disabled={isLaunchingCue || timerState === "finished" || !nextCue}
                           onClick={() => void handleLaunchCue()}
-                          aria-label={`${getLaunchActionLabel(nextCue.type)} cue ${nextCue.identifier}`}
+                          // A held key repeats its default activation (RF7a). The
+                          // click is a mouse event and cannot see `event.repeat`,
+                          // so the repeated keydown default action is cancelled
+                          // here: only the first press of the held key launches.
+                          onKeyDown={(event) => {
+                            if (event.repeat) event.preventDefault();
+                          }}
+                          aria-label={`${getLaunchActionLabel(nextCue.type, nextCue.includedTypes)} cue ${nextCue.identifier}`}
                           className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300"
                         >
                           <Play className="h-4 w-4" />
-                          {getLaunchActionLabel(nextCue.type)}
+                          {getLaunchActionLabel(nextCue.type, nextCue.includedTypes)}
                         </button>
                       </div>
                     </div>
@@ -1170,9 +1227,13 @@ export function OperationMode() {
                             <span className="shrink-0 text-xs text-slate-500">
                               Cue {launchedCount + index + 2}
                             </span>
-                            <span className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-semibold ${getCueColorClasses(cue.type)}`}>
+                            <CueTypeBadge
+                              type={cue.type}
+                              includedTypes={cue.includedTypes}
+                              className="shrink-0 px-2 py-0.5"
+                            >
                               {cue.type}
-                            </span>
+                            </CueTypeBadge>
                             <div className="min-w-0">
                               <p className="truncate text-sm font-semibold text-slate-200">{cue.identifier}</p>
                               <p className="truncate text-xs text-slate-500">{cue.description}</p>
@@ -1189,6 +1250,17 @@ export function OperationMode() {
                     </ol>
                   )}
                 </>
+            </section>
+          ) : (
+            <section className="rounded-2xl border border-dashed border-slate-700 p-5 text-sm text-slate-400">
+              {!selectedProductionId ? (
+                "Crea o selecciona una producción para preparar la función."
+              ) : cueLoadError ? (
+                <p role="alert" className="text-rose-300">{cueLoadError}</p>
+              ) : cues === null ? (
+                "Cargando cues de la producción…"
+              ) : (
+                "Esta producción no tiene cues para lanzar."
               )}
             </section>
           )}

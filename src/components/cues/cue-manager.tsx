@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Save, Trash2, Wrench } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { CueTypeBadge } from "@/components/cues/cue-type-badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -15,6 +16,7 @@ import {
 import {
   getCueIdentifierNumber,
   getCueIdentifierPattern,
+  getCueIdentifierSequenceType,
   getCueIdentifierType,
   getNextCueIdentifier,
 } from "@/lib/cue-identifiers";
@@ -45,7 +47,7 @@ const emptyCue: Cue = {
 type CueTypeFilter = CueType | "Todas";
 
 function getNextIdentifier(cues: Cue[], type: CueType): string {
-  const identifierType = getCueIdentifierType(type);
+  const identifierType = getCueIdentifierSequenceType(type);
   const maxNumber = cues.reduce((max, cue) => {
     if (cue.type !== identifierType) return max;
     const number = getCueIdentifierNumber(cue.identifier, identifierType);
@@ -238,9 +240,9 @@ export function CueManager() {
             <div key={cue.id} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${getCueColorClasses(cue.type)}`}>
+                  <CueTypeBadge type={cue.type} includedTypes={cue.includedTypes}>
                     {cue.type}
-                  </span>
+                  </CueTypeBadge>
                   <h3 className="mt-2 text-lg font-semibold text-white">{cue.identifier}</h3>
                   {cue.type === "SIM" && cue.includedTypes && (
                     <p className="mt-1 text-xs text-green-200">{cue.includedTypes.join(" + ")}</p>
@@ -297,7 +299,9 @@ export function CueManager() {
                 onChange={(event) => setField("identifier", event.target.value)}
                 pattern={form.scriptDocumentId ? getCueIdentifierPattern(form.type) : undefined}
                 required={Boolean(form.scriptDocumentId)}
-                title={form.scriptDocumentId ? "Usa un número entero o decimal, como MOV-5.5." : undefined}
+                title={form.scriptDocumentId
+                  ? `Usa un número entero o decimal, como ${getCueIdentifierType(form.type)}-5.5.`
+                  : undefined}
                 className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none placeholder:text-slate-500"
                 placeholder={`${getCueIdentifierType(form.type)}-01`}
               />
@@ -326,7 +330,7 @@ export function CueManager() {
 
           {form.type === "PREVENIR" && (
             <p className="rounded-lg border border-orange-400/30 bg-orange-500/10 px-3 py-2 text-sm text-orange-200">
-              PREVENIR avisa sobre un movimiento MOV y no incrementa su numeración.
+              PREVENIR usa el prefijo PREV y puede compartir el número de un MOV sin consumir su numeración.
             </p>
           )}
 

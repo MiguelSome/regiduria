@@ -1,35 +1,22 @@
 import { z } from "zod";
 
+import { CUE_COMPONENT_TYPES, CUE_TYPES, DEPARTMENT_NAMES } from "@/lib/types";
+
+// Enum schemas built from the single source of truth in "@/lib/types".
+const departmentNameSchema = z.enum(DEPARTMENT_NAMES);
+const cueTypeSchema = z.enum(CUE_TYPES);
+const cueComponentTypeSchema = z.enum(CUE_COMPONENT_TYPES);
+
 export const departmentSchema = z.object({
   id: z.string(),
-  name: z.enum([
-    "Iluminación",
-    "Sonido",
-    "Maquinaria",
-    "Utilería",
-    "Vestuario",
-    "Caracterización",
-    "Vídeo",
-    "Regiduría",
-    "Reparto",
-  ]),
+  name: departmentNameSchema,
   responsable: z.string(),
   notes: z.array(z.string()),
 });
 
 const projectTeamSchema = z.object({
   technical: z.array(z.object({
-    department: z.enum([
-      "Iluminación",
-      "Sonido",
-      "Maquinaria",
-      "Utilería",
-      "Vestuario",
-      "Caracterización",
-      "Vídeo",
-      "Regiduría",
-      "Reparto",
-    ]),
+    department: departmentNameSchema,
     head: z.string(),
     technicians: z.array(z.object({
       id: z.string(),
@@ -71,25 +58,15 @@ export const cueSchema = z.object({
   id: z.string(),
   productionId: z.string(),
   identifier: z.string().min(1),
-  type: z.enum(["LX", "SON", "MOV", "PREVENIR", "PROY", "ENT/MUT", "UT", "SIM", "AVISO", "VEST"]),
+  type: cueTypeSchema,
   includedTypes: z
-    .array(z.enum(["LX", "SON", "MOV", "PROY", "ENT/MUT", "UT", "AVISO", "VEST"]))
+    .array(cueComponentTypeSchema)
     .optional(),
   description: z.string().min(1),
   pie: z.string().trim().optional(),
   act: z.string(),
   scene: z.string(),
-  department: z.enum([
-    "Iluminación",
-    "Sonido",
-    "Maquinaria",
-    "Utilería",
-    "Vestuario",
-    "Caracterización",
-    "Vídeo",
-    "Regiduría",
-    "Reparto",
-  ]),
+  department: departmentNameSchema,
   observations: z.string(),
   status: z.enum(["Borrador", "Preparado", "Ejecutado", "Pendiente"]),
   executionState: z.enum(["Preparación", "Función"]),
@@ -110,10 +87,10 @@ export const scriptLabelSchema = z
     page: z.number().int().positive(),
     x: z.number().min(0).max(1),
     y: z.number().min(0).max(1),
-    cueType: z.enum(["LX", "SON", "MOV", "PREVENIR", "PROY", "ENT/MUT", "UT", "SIM", "AVISO", "VEST"]).optional(),
+    cueType: cueTypeSchema.optional(),
     cueIdentifierOverride: z.string().trim().min(1).optional(),
     includedTypes: z
-      .array(z.enum(["LX", "SON", "MOV", "PROY", "ENT/MUT", "UT", "AVISO", "VEST"]))
+      .array(cueComponentTypeSchema)
       .optional(),
   })
   .superRefine((label, context) => {
@@ -134,7 +111,7 @@ export const scriptLabelSchema = z
     }
 
     if (label.category === "cue" && label.cueIdentifierOverride) {
-      const prefix = label.cueType === "PREVENIR" ? "MOV" : label.cueType;
+      const prefix = label.cueType === "PREVENIR" ? "PREV" : label.cueType;
       const escapedPrefix = prefix?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       if (!prefix || !new RegExp(`^${escapedPrefix}-\\d+(?:\\.\\d+)?$`, "i").test(label.cueIdentifierOverride)) {
         context.addIssue({
@@ -153,17 +130,7 @@ export const incidentSchema = z.object({
   description: z.string().min(1),
   date: z.string(),
   createdAt: z.string().optional(),
-  departments: z.array(z.enum([
-    "Iluminación",
-    "Sonido",
-    "Maquinaria",
-    "Utilería",
-    "Vestuario",
-    "Caracterización",
-    "Vídeo",
-    "Regiduría",
-    "Reparto",
-  ])).optional(),
+  departments: z.array(departmentNameSchema).optional(),
   status: z.enum(["Abierta", "Seguimiento", "Cerrada"]),
 });
 
