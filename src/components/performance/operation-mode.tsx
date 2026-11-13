@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BookOpenText,
   BellRing,
@@ -15,12 +16,21 @@ import { Card } from "@/components/ui/card";
 import { ScriptPagePreview } from "@/components/pdf/script-page-preview";
 import {
   getCuesByProduction,
+  getProductions,
   getScriptDocument,
   getScriptLabels,
+  savePerformance,
 } from "@/lib/data-service";
 import { getCueColorClasses } from "@/lib/cue-presentation";
-import { performances, productions } from "@/lib/mock-data";
-import type { Cue, CueType, ScriptDocument, ScriptLabel } from "@/lib/types";
+import type {
+  Cue,
+  CueType,
+  Performance,
+  Production,
+  ScriptDocument,
+  ScriptLabel,
+} from "@/lib/types";
+import { useUiStore } from "@/store/ui-store";
 
 const launchActionByType: Partial<Record<CueType, string>> = {
   LX: "Go",
@@ -31,7 +41,7 @@ const launchActionByType: Partial<Record<CueType, string>> = {
   SIM: "TOP",
 };
 
-type TimerState = "idle" | "running" | "paused";
+type TimerState = "idle" | "running" | "paused" | "finished";
 type OperationTab = "operation" | "announcements";
 type PreparationAlertState = "idle" | "running30" | "waiting15" | "running15" | "waiting5" | "done";
 type PreparationCheckKey =
@@ -59,7 +69,7 @@ function getCueNumber(identifier: string): number {
   return suffix ? Number(suffix) : Number.MAX_SAFE_INTEGER;
 }
 
-function orderCues(cues: Cue[], labels: ScriptLabel[], productionId: string): Cue[] {
+function orderCues(cues: Cue[], labels: ScriptLabel[], production?: Production): Cue[] {
   const scriptPositionByCueId = new Map<string, number>();
   labels.forEach((label, index) => {
     if (label.category === "cue" && label.cueId) {
@@ -67,7 +77,6 @@ function orderCues(cues: Cue[], labels: ScriptLabel[], productionId: string): Cu
     }
   });
 
-  const production = productions.find((item) => item.id === productionId);
   const scenePosition = new Map(
     production?.scenes.map((scene, index) => [`${scene.act}\u0000${scene.number}`, index]) ?? [],
   );
@@ -108,6 +117,23 @@ function formatElapsedTime(milliseconds: number): string {
   return [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
 }
 
+function getElapsedAt(
+  runStartedAt: number | null,
+  elapsedBeforeRun: number,
+  timestamp: number,
+): number {
+  return elapsedBeforeRun + (runStartedAt === null ? 0 : timestamp - runStartedAt);
+}
+
+function formatLocalDate(timestamp: number): string {
+  const date = new Date(timestamp);
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
 function formatCountdown(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = seconds % 60;
@@ -131,9 +157,12 @@ function getPreparationAlertLabel(state: PreparationAlertState): string {
 }
 
 export function OperationMode() {
-  const currentShow = performances[0];
+  const [productions, setProductions] = useState<Production[]>([]);
+  const [selectedProductionId, setSelectedProductionId] = useState("");
   const [cues, setCues] = useState<Cue[] | null>(null);
   const [cueLoadError, setCueLoadError] = useState<string | null>(null);
+  const [productionLoadError, setProductionLoadError] = useState<string | null>(null);
+  const [runSaveError, setRunSaveError] = useState<string | null>(null);
   const [scriptDocument, setScriptDocument] = useState<ScriptDocument | null>(null);
   const [scriptLabels, setScriptLabels] = useState<ScriptLabel[]>([]);
   const [scriptDocumentLoading, setScriptDocumentLoading] = useState(true);
@@ -146,6 +175,17 @@ export function OperationMode() {
   const [timerState, setTimerState] = useState<TimerState>("idle");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [launchedCount, setLaunchedCount] = useState(0);
+  const [breakStartedAt, setBreakStartedAt] = useState<number | null>(null);
+  const [breakElapsedMs, setBreakElapsedMs] = useState(0);
+  const [isQuickIncidentOpen, setIsQuickIncidentOpen] = useState(false);
+  const [quickIncidentDescription, setQuickIncidentDescription] = useState("");
+  const [quickIncidentSaved, setQuickIncidentSaved] = useState(false);
+  const [quickIncidentMoment, setQuickIncidentMoment] = useState<{
+    occurredAt: number;
+    elapsedMs: number;
+  } | null>(null);
+  const [isStartingFunction, setIsStartingFunction] = useState(false);
+  const [isSavingQuickIncident, setIsSavingQuickIncident] = useState(false);
   const [tecMode, setTecMode] = useState(false);
   const [activeTab, setActiveTab] = useState<OperationTab>("operation");
   const [preparationAlertState, setPreparationAlertState] = useState<PreparationAlertState>("idle");
@@ -158,23 +198,64 @@ export function OperationMode() {
     lights: false,
     props: false,
   });
+  const activeProjectId = useUiStore((state) => state.selectedProjectId);
+  const setActiveProjectId = useUiStore((state) => state.setSelectedProjectId);
+  const setProductionSelectionLocked = useUiStore((state) => state.setProductionSelectionLocked);
+  const selectedProduction = productions.find((production) => production.id === selectedProductionId);
   const runStartedAt = useRef<number | null>(null);
   const elapsedBeforeRun = useRef(0);
+  const launchedCountRef = useRef(0);
+  const breakStartedAtRef = useRef<number | null>(null);
+  const performanceRecordRef = useRef<Performance | null>(null);
+  const performanceSaveQueue = useRef<Promise<void>>(Promise.resolve());
+  const isStartingFunctionRef = useRef(false);
   const launchButtonRef = useRef<HTMLButtonElement | null>(null);
   const preparationAlertDeadline = useRef<number | null>(null);
 
   useEffect(() => {
     let active = true;
 
+    const loadProductions = async () => {
+      try {
+        const nextProductions = await getProductions();
+        if (!active) return;
+
+        setProductions(nextProductions);
+        const currentProjectId = useUiStore.getState().selectedProjectId;
+        const selected =
+          nextProductions.find((production) => production.id === currentProjectId) ??
+          nextProductions[0];
+        const nextId = selected?.id ?? "";
+        const shouldUpdateActiveProject = nextId !== currentProjectId;
+        setSelectedProductionId(nextId);
+        if (shouldUpdateActiveProject) setActiveProjectId(nextId);
+        setProductionLoadError(null);
+      } catch (loadError) {
+        console.error(loadError);
+        if (active) setProductionLoadError("No se pudieron cargar las producciones.");
+      }
+    };
+
+    void loadProductions();
+    return () => {
+      active = false;
+    };
+  }, [setActiveProjectId]);
+
+  useEffect(() => {
+    let active = true;
+
     const loadCues = async () => {
+      if (!selectedProduction) return;
+
       try {
         const [productionCues, document] = await Promise.all([
-          getCuesByProduction(currentShow.productionId),
-          getScriptDocument(currentShow.productionId),
+          getCuesByProduction(selectedProduction.id),
+          getScriptDocument(selectedProduction.id),
         ]);
         const labels = document ? await getScriptLabels(document.id) : [];
         if (active) {
-          setCues(orderCues(productionCues, labels, currentShow.productionId));
+          setCues(orderCues(productionCues, labels, selectedProduction));
           setScriptDocument(document ?? null);
           setScriptLabels(labels);
           setScriptDocumentLoading(false);
@@ -192,7 +273,7 @@ export function OperationMode() {
     return () => {
       active = false;
     };
-  }, [currentShow.productionId]);
+  }, [selectedProduction]);
 
   useEffect(() => {
     if (timerState !== "running") return;
@@ -206,6 +287,16 @@ export function OperationMode() {
 
     return () => window.clearInterval(interval);
   }, [timerState]);
+
+  useEffect(() => {
+    if (breakStartedAt === null) return;
+
+    const interval = window.setInterval(() => {
+      setBreakElapsedMs(Date.now() - breakStartedAt);
+    }, 250);
+
+    return () => window.clearInterval(interval);
+  }, [breakStartedAt]);
 
   useEffect(() => {
     if (preparationAlertState !== "running30" && preparationAlertState !== "running15") return;
@@ -251,7 +342,9 @@ export function OperationMode() {
         launchButtonRef.current?.click();
       } else if (event.key === "ArrowLeft") {
         event.preventDefault();
-        setLaunchedCount((count) => Math.max(count - 1, 0));
+        const previousCount = Math.max(launchedCountRef.current - 1, 0);
+        launchedCountRef.current = previousCount;
+        setLaunchedCount(previousCount);
       }
     };
 
@@ -269,23 +362,285 @@ export function OperationMode() {
     };
   }, [isLibretoOpen]);
 
-  const toggleTimer = () => {
-    if (timerState === "running") {
-      const start = runStartedAt.current;
-      if (start !== null) {
-        const total = elapsedBeforeRun.current + Date.now() - start;
-        elapsedBeforeRun.current = total;
-        setElapsedMs(total);
+  const persistPerformance = (performance: Performance): Promise<boolean> => {
+    performanceRecordRef.current = performance;
+    const saveResult = performanceSaveQueue.current.then(async () => {
+      try {
+        await savePerformance(performance);
+        setRunSaveError(null);
+        return true;
+      } catch (saveError) {
+        console.error(saveError);
+        setRunSaveError("No se pudo guardar el registro de la función.");
+        return false;
       }
+    });
+    performanceSaveQueue.current = saveResult.then(() => undefined);
+    return saveResult;
+  };
+
+  const toggleTimer = async () => {
+    if (timerState === "running") {
+      const now = Date.now();
+      const total = getElapsedAt(runStartedAt.current, elapsedBeforeRun.current, now);
+      elapsedBeforeRun.current = total;
+      setElapsedMs(total);
       runStartedAt.current = null;
       setTimerState("paused");
+      const currentPerformance = performanceRecordRef.current;
+      if (currentPerformance?.runReport) {
+        void persistPerformance({
+          ...currentPerformance,
+          runReport: { ...currentPerformance.runReport, durationMs: total },
+        });
+      }
       return;
     }
 
-    runStartedAt.current = Date.now();
+    if (timerState === "paused") {
+      if (breakStartedAtRef.current !== null) return;
+      runStartedAt.current = Date.now();
+      setTimerState("running");
+      setActiveTab("operation");
+      return;
+    }
+
+    if (
+      timerState !== "idle" ||
+      isStartingFunctionRef.current ||
+      !selectedProduction ||
+      !cues?.length
+    ) {
+      return;
+    }
+
+    isStartingFunctionRef.current = true;
+    setIsStartingFunction(true);
+    setProductionSelectionLocked(true);
+    const now = Date.now();
+    const startedAt = new Date(now).toISOString();
+    const performance: Performance = {
+      id: crypto.randomUUID(),
+      productionId: selectedProduction.id,
+      title: selectedProduction.title,
+      date: formatLocalDate(now),
+      time: new Date(now).toLocaleTimeString("es-ES", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      }),
+      prepared: 0,
+      total: cues.length,
+      notes: [],
+      runReport: {
+        startedAt,
+        durationMs: 0,
+        launchedCueCount: 0,
+        breaks: [],
+        quickIncidents: [],
+      },
+    };
+
+    const saved = await persistPerformance(performance);
+    isStartingFunctionRef.current = false;
+    setIsStartingFunction(false);
+    if (!saved) {
+      if (performanceRecordRef.current?.id === performance.id) {
+        performanceRecordRef.current = null;
+      }
+      setProductionSelectionLocked(false);
+      return;
+    }
+
+    runStartedAt.current = now;
+    elapsedBeforeRun.current = 0;
+    launchedCountRef.current = 0;
+    setElapsedMs(0);
+    setLaunchedCount(0);
     setTimerState("running");
     setActiveTab("operation");
   };
+
+  const toggleBreak = async () => {
+    const currentPerformance = performanceRecordRef.current;
+    if (!currentPerformance?.runReport) return;
+
+    const now = Date.now();
+    const activeBreakStart = breakStartedAtRef.current;
+    if (activeBreakStart !== null) {
+      const breaks = [...currentPerformance.runReport.breaks];
+      const lastBreak = breaks[breaks.length - 1];
+      if (!lastBreak || lastBreak.endedAt) return;
+
+      const endedAt = new Date(now).toISOString();
+      const durationMs = now - activeBreakStart;
+      breaks[breaks.length - 1] = { ...lastBreak, endedAt, durationMs };
+      const updatedPerformance: Performance = {
+        ...currentPerformance,
+        runReport: { ...currentPerformance.runReport, breaks },
+      };
+      if (!(await persistPerformance(updatedPerformance))) return;
+
+      breakStartedAtRef.current = null;
+      setBreakStartedAt(null);
+      setBreakElapsedMs(0);
+      runStartedAt.current = now;
+      setTimerState("running");
+      setActiveTab("operation");
+      return;
+    }
+
+    if (timerState !== "running" && timerState !== "paused") return;
+    const elapsed = getElapsedAt(runStartedAt.current, elapsedBeforeRun.current, now);
+    const breaks = [
+      ...currentPerformance.runReport.breaks,
+      { startedAt: new Date(now).toISOString(), durationMs: 0 },
+    ];
+    const updatedPerformance: Performance = {
+      ...currentPerformance,
+      runReport: { ...currentPerformance.runReport, durationMs: elapsed, breaks },
+    };
+
+    if (timerState === "running") {
+      elapsedBeforeRun.current = elapsed;
+      runStartedAt.current = null;
+      setElapsedMs(elapsed);
+      setTimerState("paused");
+    }
+    breakStartedAtRef.current = now;
+    setBreakStartedAt(now);
+    setBreakElapsedMs(0);
+    void persistPerformance(updatedPerformance);
+  };
+
+  const handleQuickIncident = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const description = quickIncidentDescription.trim();
+    const currentPerformance = performanceRecordRef.current;
+    if (!description || !currentPerformance?.runReport || !quickIncidentMoment || isSavingQuickIncident) return;
+
+    setIsSavingQuickIncident(true);
+    const elapsedMs = quickIncidentMoment.elapsedMs;
+    const updatedPerformance: Performance = {
+      ...currentPerformance,
+      runReport: {
+        ...currentPerformance.runReport,
+        durationMs: elapsedMs,
+        quickIncidents: [
+          ...currentPerformance.runReport.quickIncidents,
+          {
+            id: crypto.randomUUID(),
+            occurredAt: new Date(quickIncidentMoment.occurredAt).toISOString(),
+            elapsedMs,
+            elapsedMinutes: Math.floor(elapsedMs / 60_000),
+            description,
+          },
+        ],
+      },
+    };
+
+    const saved = await persistPerformance(updatedPerformance);
+    setIsSavingQuickIncident(false);
+    if (saved) {
+      setQuickIncidentDescription("");
+      setQuickIncidentMoment(null);
+      setIsQuickIncidentOpen(false);
+      setQuickIncidentSaved(true);
+    }
+  };
+
+  const handleLaunchCue = async () => {
+    if (timerState !== "running" || !cues) return;
+    const nextCount = Math.min(launchedCountRef.current + 1, cues.length);
+    if (nextCount === launchedCountRef.current) return;
+
+    const currentPerformance = performanceRecordRef.current;
+    if (!currentPerformance?.runReport) {
+      setRunSaveError("No se encontró el registro activo de esta función.");
+      return;
+    }
+
+    const now = Date.now();
+    const elapsed = getElapsedAt(runStartedAt.current, elapsedBeforeRun.current, now);
+    const isFinished = nextCount === cues.length;
+    const updatedPerformance: Performance = {
+      ...currentPerformance,
+      runReport: {
+        ...currentPerformance.runReport,
+        durationMs: elapsed,
+        launchedCueCount: nextCount,
+        ...(isFinished ? { endedAt: new Date(now).toISOString() } : {}),
+      },
+    };
+
+    launchedCountRef.current = nextCount;
+    setLaunchedCount(nextCount);
+    if (isFinished) {
+      runStartedAt.current = null;
+      elapsedBeforeRun.current = elapsed;
+      setElapsedMs(elapsed);
+      setTimerState("finished");
+      setProductionSelectionLocked(false);
+    }
+    await persistPerformance(updatedPerformance);
+  };
+
+  const handleProductionChange = useCallback((productionId: string) => {
+    setSelectedProductionId(productionId);
+    setActiveProjectId(productionId);
+    setProductionSelectionLocked(false);
+    setCues(null);
+    setCueLoadError(null);
+    setScriptDocument(null);
+    setScriptLabels([]);
+    setScriptDocumentLoading(true);
+    setTotalScriptPages(0);
+    setManualScriptPage({ cueId: null, page: 1 });
+    setIsLibretoOpen(false);
+    setTimerState("idle");
+    setElapsedMs(0);
+    elapsedBeforeRun.current = 0;
+    runStartedAt.current = null;
+    setLaunchedCount(0);
+    launchedCountRef.current = 0;
+    setBreakStartedAt(null);
+    breakStartedAtRef.current = null;
+    setBreakElapsedMs(0);
+    setIsQuickIncidentOpen(false);
+    setQuickIncidentDescription("");
+    setQuickIncidentSaved(false);
+    setQuickIncidentMoment(null);
+    isStartingFunctionRef.current = false;
+    setIsStartingFunction(false);
+    setTecMode(false);
+    setActiveTab("operation");
+    setPreparationAlertState("idle");
+    preparationAlertDeadline.current = null;
+    setPreparationAlertSeconds(30 * 60);
+    setPreparationChecks({
+      soundPassed: false,
+      microphones: false,
+      stageManagement: false,
+      machinery: false,
+      lights: false,
+      props: false,
+    });
+    performanceRecordRef.current = null;
+    setRunSaveError(null);
+  }, [setActiveProjectId, setProductionSelectionLocked]);
+
+  useEffect(() => {
+    if (selectedProductionId === activeProjectId || (activeProjectId && productions.length === 0)) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      handleProductionChange(activeProjectId);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [activeProjectId, handleProductionChange, productions.length, selectedProductionId]);
+
+  useEffect(() => () => setProductionSelectionLocked(false), [setProductionSelectionLocked]);
 
   const handlePreparationAlert = () => {
     if (preparationAlertState === "idle") {
@@ -323,6 +678,8 @@ export function OperationMode() {
   const launchedCues = cues?.slice(Math.max(0, launchedCount - 2), launchedCount) ?? [];
   const nextCue = cues?.[launchedCount];
   const followingCues = cues?.slice(launchedCount + 1, launchedCount + 4) ?? [];
+  const cueProgress = cues?.length ? Math.round((launchedCount / cues.length) * 100) : 0;
+  const canStartFunction = Boolean(selectedProductionId && cues?.length);
   const activeScriptCue = nextCue ?? cues?.[launchedCount - 1];
   const activeScriptCuePage = getCueScriptPage(activeScriptCue, scriptLabels);
   const requestedScriptPage =
@@ -374,11 +731,22 @@ export function OperationMode() {
       <div className={`mb-5 flex flex-wrap items-center justify-between gap-3 ${isLibretoOpen ? "mb-3 shrink-0" : ""}`}>
         <div>
           <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Modo función</p>
-          <h2 className="mt-2 text-xl font-semibold text-white">{currentShow.title}</h2>
+        <h2 className="mt-2 text-xl font-semibold text-white">
+          {selectedProduction?.title ?? "Selecciona una producción"}
+        </h2>
+        {productionLoadError && (
+          <p role="alert" className="mt-2 text-sm text-rose-300">{productionLoadError}</p>
+        )}
         </div>
-        <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-3">
+        {!selectedProductionId && (
+          <Link href="/proyectos" className="min-h-10 rounded-xl border border-cyan-500/30 px-3 py-2 text-sm text-cyan-200 hover:bg-cyan-500/10">
+            Crear proyecto
+          </Link>
+        )}
           <button
             type="button"
+          disabled={!selectedProductionId}
             aria-pressed={isLibretoOpen}
             aria-controls="libreto-performance-view"
             aria-keyshortcuts={isLibretoOpen ? "Escape" : undefined}
@@ -390,7 +758,7 @@ export function OperationMode() {
               isLibretoOpen
                 ? "border-cyan-300 bg-cyan-400 text-slate-950"
                 : "border-slate-600 bg-slate-900 text-slate-200 hover:border-slate-400"
-            }`}
+            } disabled:cursor-not-allowed disabled:opacity-50`}
           >
             <BookOpenText className="h-4 w-4" />
             Libreto
@@ -400,9 +768,17 @@ export function OperationMode() {
               ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
               : timerState === "paused"
                 ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
-                : "border-slate-700 bg-slate-950 text-slate-300"
+                : timerState === "finished"
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                  : "border-slate-700 bg-slate-950 text-slate-300"
           }`}>
-            {timerState === "running" ? "En curso" : timerState === "paused" ? "En pausa" : "En espera"}
+            {timerState === "running"
+              ? "En curso"
+              : timerState === "paused"
+                ? "En pausa"
+                : timerState === "finished"
+                  ? "Finalizada"
+                  : "En espera"}
           </span>
         </div>
       </div>
@@ -448,24 +824,167 @@ export function OperationMode() {
                   {formatElapsedTime(elapsedMs)}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={toggleTimer}
-                aria-label={timerState === "running" ? "Pausar función" : timerState === "paused" ? "Reanudar función" : "Iniciar función"}
-                className={`inline-flex min-h-12 items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 ${
-                  timerState === "running"
-                    ? "bg-amber-600 hover:bg-amber-500 focus-visible:outline-amber-300"
-                    : "bg-emerald-600 hover:bg-emerald-500 focus-visible:outline-emerald-300"
-                }`}
-              >
-                {timerState === "running" ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
-                {timerState === "running" ? "Pausar" : timerState === "paused" ? "Reanudar" : "Iniciar"}
-              </button>
+              <div className="flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={toggleTimer}
+                  disabled={
+                    timerState === "finished" ||
+                    isStartingFunction ||
+                    breakStartedAt !== null ||
+                    (timerState === "idle" && !canStartFunction)
+                  }
+                  aria-label={
+                    timerState === "running"
+                      ? "Pausar función"
+                      : timerState === "paused"
+                        ? "Reanudar función"
+                        : timerState === "finished"
+                          ? "Función finalizada"
+                          : isStartingFunction
+                            ? "Iniciando función"
+                            : "Iniciar función"
+                  }
+                  className={`inline-flex min-h-12 items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50 ${
+                    timerState === "running"
+                      ? "bg-amber-600 hover:bg-amber-500 focus-visible:outline-amber-300"
+                      : "bg-emerald-600 hover:bg-emerald-500 focus-visible:outline-emerald-300"
+                  }`}
+                >
+                  {timerState === "running"
+                    ? <Pause className="h-5 w-5" />
+                    : timerState === "finished"
+                      ? <CheckCircle2 className="h-5 w-5" />
+                      : <Play className="h-5 w-5" />}
+                  {timerState === "running"
+                    ? "Pausar"
+                    : timerState === "paused"
+                      ? "Reanudar"
+                      : timerState === "finished"
+                        ? "Finalizada"
+                        : isStartingFunction
+                          ? "Iniciando…"
+                          : "Iniciar"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void toggleBreak()}
+                  disabled={
+                    breakStartedAt === null &&
+                    timerState !== "running" &&
+                    timerState !== "paused"
+                  }
+                  className="inline-flex min-h-10 items-center justify-center rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-200 hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {breakStartedAt === null ? "Descanso" : "Retomamos"}
+                </button>
+              </div>
             </div>
+
+            {breakStartedAt !== null && (
+              <p
+                className="mt-3 text-right font-mono text-lg tabular-nums text-amber-200"
+                aria-label={`Duración del descanso ${formatElapsedTime(breakElapsedMs)}`}
+                aria-live="off"
+              >
+                Descanso {formatElapsedTime(breakElapsedMs)}
+              </p>
+            )}
+
+            <div className="mt-5">
+              <div className="mb-2 flex items-center justify-between text-sm">
+                <span className="text-slate-400">Progreso de cues</span>
+                <span className="font-semibold tabular-nums text-cyan-200">
+                  {launchedCount}/{cues?.length ?? 0} · {cueProgress}%
+                </span>
+              </div>
+              <div
+                role="progressbar"
+                aria-label="Progreso de cues"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={cueProgress}
+                aria-valuetext={`${launchedCount} de ${cues?.length ?? 0} cues lanzadas`}
+                className="h-2.5 overflow-hidden rounded-full bg-slate-800"
+              >
+                <div
+                  className="h-full rounded-full bg-cyan-400 transition-[width] duration-300"
+                  style={{ width: `${cueProgress}%` }}
+                />
+              </div>
+            </div>
+
+            {(timerState === "running" || isQuickIncidentOpen) && (
+              <div className="mt-4">
+                {timerState === "running" && !isQuickIncidentOpen && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const occurredAt = Date.now();
+                      setQuickIncidentSaved(false);
+                      setQuickIncidentMoment({
+                        occurredAt,
+                        elapsedMs: getElapsedAt(runStartedAt.current, elapsedBeforeRun.current, occurredAt),
+                      });
+                      setIsQuickIncidentOpen(true);
+                    }}
+                    className="min-h-10 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-200 hover:bg-rose-500/20"
+                  >
+                    Incidencia rápida
+                  </button>
+                )}
+                {isQuickIncidentOpen && (
+                  <form
+                    onSubmit={handleQuickIncident}
+                    className="space-y-3 rounded-xl border border-rose-500/25 bg-rose-500/5 p-3"
+                  >
+                    <label className="block space-y-2 text-sm text-slate-200">
+                      <span>Descripción de la incidencia</span>
+                      <textarea
+                        autoFocus
+                        required
+                        value={quickIncidentDescription}
+                        onChange={(event) => setQuickIncidentDescription(event.target.value)}
+                        className="min-h-20 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none focus-visible:ring-2 focus-visible:ring-rose-400"
+                        placeholder="Describe brevemente lo ocurrido"
+                      />
+                    </label>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <button
+                        type="submit"
+                        disabled={isSavingQuickIncident}
+                        className="min-h-10 rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500 disabled:cursor-wait disabled:opacity-50"
+                      >
+                        {isSavingQuickIncident ? "Guardando…" : "Guardar incidencia"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsQuickIncidentOpen(false);
+                          setQuickIncidentMoment(null);
+                        }}
+                        className="min-h-10 rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800"
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </form>
+                )}
+                {quickIncidentSaved && (
+                  <p role="status" className="mt-2 text-sm text-emerald-300">
+                    Incidencia guardada para el reporte.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {runSaveError && (
+              <p role="alert" className="mt-3 text-sm text-rose-300">{runSaveError}</p>
+            )}
           </section>
 
           {timerState === "paused" && (
-            <div role="tablist" aria-label="Pestañas de función" className="flex gap-2 border-b border-slate-700">
+            <div role="tablist" aria-label="Pestañas de función" className="flex flex-wrap gap-3 border-b border-slate-700">
               <button
                 type="button"
                 role="tab"
@@ -507,7 +1026,15 @@ export function OperationMode() {
             </section>
           ) : timerState === "idle" ? (
             <section className="rounded-2xl border border-dashed border-slate-700 p-5 text-sm text-slate-400">
-              Al iniciar el cronómetro aparecerá aquí la primera cue de la función.
+              {!selectedProductionId
+                ? "Crea o selecciona una producción para preparar la función."
+                : cueLoadError
+                  ? cueLoadError
+                  : cues === null
+                    ? "Cargando cues de la producción…"
+                    : cues.length === 0
+                      ? "Esta producción no tiene cues para lanzar."
+                      : "Al iniciar el cronómetro aparecerá aquí la primera cue de la función."}
             </section>
           ) : (
             <section aria-label="Secuencia de cues" className="space-y-3">
@@ -617,7 +1144,7 @@ export function OperationMode() {
                           ref={launchButtonRef}
                           type="button"
                           disabled={timerState !== "running"}
-                          onClick={() => setLaunchedCount((count) => Math.min(count + 1, cues.length))}
+                          onClick={() => void handleLaunchCue()}
                           aria-label={`${getLaunchActionLabel(nextCue.type)} cue ${nextCue.identifier}`}
                           className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300"
                         >
@@ -769,14 +1296,6 @@ export function OperationMode() {
             </fieldset>
           </section>
 
-          <section className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-            <div className="flex items-center gap-2 text-cyan-300">
-              <Clock3 className="h-4 w-4" />
-              <h3 className="text-sm font-semibold">Próxima función</h3>
-            </div>
-            <p className="mt-3 text-lg font-semibold text-white">{currentShow.title}</p>
-            <p className="mt-1 text-sm text-slate-300">{currentShow.date} · {currentShow.time}</p>
-          </section>
         </div>
         )}
       </div>

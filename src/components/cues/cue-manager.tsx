@@ -58,12 +58,12 @@ function getNextIdentifier(cues: Cue[], type: CueType): string {
 export function CueManager() {
   const [projects, setProjects] = useState<Production[]>([]);
   const [cues, setCues] = useState<Cue[]>([]);
-  const [selectedProductionId, setSelectedProductionId] = useState<string>("");
   const [selectedType, setSelectedType] = useState<CueTypeFilter>("Todas");
   const [form, setForm] = useState<Cue>(emptyCue);
   const editCueHandled = useRef(false);
   const activeProjectId = useUiStore((state) => state.selectedProjectId);
   const setActiveProjectId = useUiStore((state) => state.setSelectedProjectId);
+  const selectedProductionId = activeProjectId;
 
   const loadData = useCallback(async () => {
     const nextProjects = await getProductions();
@@ -83,7 +83,7 @@ export function CueManager() {
       nextProjects[0];
     const nextProductionId = selectedProject?.id ?? "";
 
-    setSelectedProductionId(nextProductionId);
+    setSelectedType("Todas");
     if (nextProductionId !== activeProjectId) setActiveProjectId(nextProductionId);
     setForm((current) => {
       if (requestedCue && requestedCue.productionId === nextProductionId) {
@@ -173,30 +173,7 @@ export function CueManager() {
 
   return (
     <div>
-      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <label className="block w-full space-y-2 text-sm text-slate-300 sm:max-w-sm">
-          <span>Producción</span>
-          <select
-            value={selectedProductionId}
-            disabled={projects.length === 0}
-            onChange={(event) => {
-              const productionId = event.target.value;
-              setSelectedProductionId(productionId);
-              setActiveProjectId(productionId);
-              setSelectedType("Todas");
-              setForm({ ...emptyCue, productionId });
-            }}
-            className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 disabled:opacity-60"
-          >
-            {projects.length === 0 ? (
-              <option value="">No hay proyectos</option>
-            ) : (
-              projects.map((project) => (
-                <option key={project.id} value={project.id}>{project.title}</option>
-              ))
-            )}
-          </select>
-        </label>
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         {projects.length === 0 && (
           <p className="text-sm text-slate-400">
             Crea primero un proyecto en{" "}
@@ -221,7 +198,7 @@ export function CueManager() {
             </div>
           </div>
 
-          <div className="flex flex-wrap gap-2" role="group" aria-label="Filtrar cues por tipo">
+          <div className="flex flex-wrap gap-3" role="group" aria-label="Filtrar cues por tipo">
             <Button
               type="button"
               aria-pressed={selectedType === "Todas"}
@@ -285,7 +262,7 @@ export function CueManager() {
                 <span>{cue.department}</span>
               </div>
 
-              <div className="mt-4 flex items-center gap-2">
+              <div className="mt-4 flex items-center gap-3">
                 <Button type="button" onClick={() => setForm(cue)} className="border-slate-700 bg-slate-900 text-slate-100">
                   Editar
                 </Button>

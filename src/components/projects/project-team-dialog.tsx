@@ -141,7 +141,7 @@ export function ProjectTeamDialog({ team, onChange, onClose }: ProjectTeamDialog
           </button>
         </header>
 
-        <div role="tablist" aria-label="Equipo del proyecto" className="flex border-b border-slate-800 px-5">
+        <div role="tablist" aria-label="Equipo del proyecto" className="flex flex-wrap gap-3 border-b border-slate-800 px-5 py-3">
           {([
             { id: "artistic", label: "Artístico" },
             { id: "technical", label: "Técnico" },
@@ -152,10 +152,10 @@ export function ProjectTeamDialog({ team, onChange, onClose }: ProjectTeamDialog
               role="tab"
               aria-selected={activeTab === tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`border-b-2 px-4 py-3 text-sm font-medium ${
+              className={`rounded-lg border px-4 py-2.5 text-sm font-medium transition ${
                 activeTab === tab.id
-                  ? "border-cyan-400 text-cyan-200"
-                  : "border-transparent text-slate-400 hover:text-white"
+                  ? "border-cyan-400/40 bg-cyan-500/10 text-cyan-200"
+                  : "border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-600 hover:text-white"
               }`}
             >
               {tab.label}

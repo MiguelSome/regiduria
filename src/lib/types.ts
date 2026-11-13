@@ -130,7 +130,32 @@ export interface Incident {
   title: string;
   description: string;
   date: string;
+  createdAt?: string;
+  departments?: DepartmentName[];
   status: "Abierta" | "Seguimiento" | "Cerrada";
+}
+
+export interface PerformanceBreak {
+  startedAt: string;
+  endedAt?: string;
+  durationMs: number;
+}
+
+export interface PerformanceQuickIncident {
+  id: string;
+  occurredAt: string;
+  elapsedMs: number;
+  elapsedMinutes: number;
+  description: string;
+}
+
+export interface PerformanceRunReport {
+  startedAt: string;
+  endedAt?: string;
+  durationMs: number;
+  launchedCueCount: number;
+  breaks: PerformanceBreak[];
+  quickIncidents: PerformanceQuickIncident[];
 }
 
 export interface Performance {
@@ -142,6 +167,7 @@ export interface Performance {
   prepared: number;
   total: number;
   notes: string[];
+  runReport?: PerformanceRunReport;
 }
 
 export interface Performer {

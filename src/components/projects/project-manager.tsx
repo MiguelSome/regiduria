@@ -418,7 +418,7 @@ export function ProjectManager() {
                 })}
               </ul>
 
-              <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-800 pt-4">
+              <div className="mt-4 flex flex-wrap gap-3 border-t border-slate-800 pt-4">
                 <Button type="button" onClick={beginNewProject} className="border-slate-700 bg-slate-900">
                   <Plus className="mr-2 h-4 w-4" />
                   Crear proyecto
@@ -445,7 +445,7 @@ export function ProjectManager() {
                   {isCreating ? "Nuevo proyecto" : form.title || "Proyecto sin título"}
                 </h2>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-3">
                 {!isCreating && (
                   <span role="status" className="inline-flex items-center gap-1.5 text-xs text-slate-400">
                     {saveState === "saving" ? (

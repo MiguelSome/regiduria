@@ -152,6 +152,18 @@ export const incidentSchema = z.object({
   title: z.string().min(1),
   description: z.string().min(1),
   date: z.string(),
+  createdAt: z.string().optional(),
+  departments: z.array(z.enum([
+    "Iluminación",
+    "Sonido",
+    "Maquinaria",
+    "Utilería",
+    "Vestuario",
+    "Caracterización",
+    "Vídeo",
+    "Regiduría",
+    "Reparto",
+  ])).optional(),
   status: z.enum(["Abierta", "Seguimiento", "Cerrada"]),
 });
 

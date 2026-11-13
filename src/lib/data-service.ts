@@ -5,7 +5,7 @@ import {
   getCueIdentifierType,
   getNextCueIdentifier,
 } from "@/lib/cue-identifiers";
-import { cueSchema, productionSchema, scriptLabelSchema } from "@/lib/schemas";
+import { cueSchema, incidentSchema, productionSchema, scriptLabelSchema } from "@/lib/schemas";
 import type {
   Cue,
   CueType,
@@ -449,6 +449,15 @@ export async function getIncidents(): Promise<Incident[]> {
   return regiduriaDb.incidents.orderBy("date").reverse().toArray();
 }
 
+export async function saveIncident(incident: Incident): Promise<void> {
+  const validatedIncident = incidentSchema.parse(incident);
+  await regiduriaDb.incidents.put(validatedIncident);
+}
+
 export async function getPerformances(): Promise<Performance[]> {
   return regiduriaDb.performances.orderBy("date").toArray();
+}
+
+export async function savePerformance(performance: Performance): Promise<void> {
+  await regiduriaDb.performances.put(performance);
 }

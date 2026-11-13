@@ -142,7 +142,7 @@ export function ScriptPagePreview({
         </div>
 
         {totalPages > 0 && (
-          <nav aria-label="Navegación del libreto" className="flex items-center gap-2">
+          <nav aria-label="Navegación del libreto" className="flex items-center gap-3">
             <button
               type="button"
               onClick={() => goToPage(pageNumber - 1)}

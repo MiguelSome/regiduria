@@ -567,7 +567,7 @@ export function LibretoViewer() {
         <div>
           <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Libreto</p>
           {isEditingName && scriptDocument ? (
-            <form onSubmit={handleRenameDocument} className="mt-2 flex flex-wrap items-center gap-2">
+            <form onSubmit={handleRenameDocument} className="mt-2 flex flex-wrap items-center gap-3">
               <input
                 autoFocus
                 required
@@ -612,7 +612,7 @@ export function LibretoViewer() {
           )}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-3">
           <div className="flex max-w-full items-center gap-2 rounded-full border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm text-slate-300">
             <FileText className="h-4 w-4 shrink-0 text-cyan-300" />
             <span className="truncate">{scriptDocument?.fileName ?? "PDF local"}</span>

@@ -47,3 +47,19 @@ const cueColorClasses: Record<CueType, string> = {
 export function getCueColorClasses(type: CueType): string {
   return cueColorClasses[type];
 }
+
+const departmentCueType: Record<DepartmentName, CueType> = {
+  Iluminación: "LX",
+  Sonido: "SON",
+  Maquinaria: "MOV",
+  Utilería: "UT",
+  Vestuario: "VEST",
+  Caracterización: "VEST",
+  Vídeo: "PROY",
+  Regiduría: "ENT/MUT",
+  Reparto: "AVISO",
+};
+
+export function getDepartmentCueColorClasses(department: DepartmentName): string {
+  return getCueColorClasses(departmentCueType[department]);
+}
