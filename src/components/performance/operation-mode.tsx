@@ -15,13 +15,34 @@ import {
 import { Card } from "@/components/ui/card";
 import { ScriptPagePreview } from "@/components/pdf/script-page-preview";
 import { CueTypeBadge } from "@/components/cues/cue-type-badge";
+import { Countdown } from "@/components/dance/countdown";
+import { CueNote } from "@/components/dance/cue-note";
+import { LiveSchedule } from "@/components/dance/live-schedule";
+import { ModeBadge } from "@/components/dance/mode-badge";
+import { ShowClock } from "@/components/dance/show-clock";
+import { TrackPanel } from "@/components/dance/track-panel";
 import {
+  deletePerformance,
   getCuesByProduction,
+  getDanceTracks,
+  getPerformances,
   getProductions,
   getScriptDocument,
   getScriptLabels,
+  saveCue,
   savePerformance,
 } from "@/lib/data-service";
+import { getLaunchAvailability, LAUNCH_REASON_NOT_NEXT } from "@/lib/dance/clock";
+import {
+  appendLaunch,
+  closeTrackRun,
+  finishPerformance,
+  isSessionOpenRecord,
+  openDanceRecord,
+} from "@/lib/dance/performance";
+import { buildCueLaunchEvent } from "@/lib/dance/report";
+import { buildSchedule, resolveCueTiming } from "@/lib/dance/schedule";
+import { getNextCandidate } from "@/lib/dance/sequence";
 import {
   applyCueLaunch,
   buildPerformanceRecord,
@@ -32,12 +53,16 @@ import {
 import type {
   Cue,
   CueComponentType,
+  CueLaunchEvent,
   CueType,
+  DanceTrack,
   Performance,
   Production,
   ScriptDocument,
   ScriptLabel,
+  TrackRun,
 } from "@/lib/types";
+import { useDanceRuntimeStore } from "@/store/dance-runtime-store";
 import { useUiStore } from "@/store/ui-store";
 
 const launchActionByType: Partial<Record<CueType, string>> = {
@@ -50,7 +75,22 @@ const launchActionByType: Partial<Record<CueType, string>> = {
 };
 
 type TimerState = "idle" | "running" | "paused" | "finished";
-type OperationTab = "operation" | "announcements";
+type OperationTab = "operation" | "announcements" | "document";
+
+const DANCE_LAUNCH_REASON_ID = "dance-launch-disabled-reason";
+const DANCE_FINISH_REASON_ID = "dance-finish-disabled-reason";
+const DANCE_START_REASON_ID = "dance-start-disabled-reason";
+const DANCE_BREAK_REASON_ID = "dance-break-disabled-reason";
+const DANCE_LIBRETO_REASON_ID = "dance-libreto-disabled-reason";
+const DANCE_INCIDENT_REASON_ID = "dance-incident-saving-reason";
+const DANCE_FINISH_ERROR = "No se pudo finalizar la función. Inténtalo de nuevo.";
+const DANCE_DISCARD_ERROR = "No se pudo descartar la función. Inténtalo de nuevo.";
+
+// T10/A2: preferencia de tamaño definida por la entrega de app-shell; aquí solo se consume.
+const scaledClockStyle = { fontSize: "calc(2.25rem * var(--dance-font-scale, 1))" } as const;
+const scaledBreakStyle = { fontSize: "calc(1.125rem * var(--dance-font-scale, 1))" } as const;
+const scaledSmStyle = { fontSize: "calc(0.875rem * var(--dance-font-scale, 1))" } as const;
+const scaledTinyStyle = { fontSize: "calc(0.75rem * var(--dance-font-scale, 1))" } as const;
 type PreparationAlertState = "idle" | "running30" | "waiting15" | "running15" | "waiting5" | "done";
 type PreparationCheckKey =
   | "soundPassed"
@@ -79,6 +119,11 @@ function getLaunchActionLabel(
   }
 
   return launchActionByType[type] ?? "Lanzar";
+}
+
+/** Clock reads stay in effects and handlers; the helper keeps React render pure. */
+function currentInstant(): number {
+  return Date.now();
 }
 
 function getCueNumber(identifier: string): number {
@@ -168,9 +213,19 @@ export function OperationMode() {
   const [productions, setProductions] = useState<Production[]>([]);
   const [selectedProductionId, setSelectedProductionId] = useState("");
   const [cues, setCues] = useState<Cue[] | null>(null);
+  const [danceTracks, setDanceTracks] = useState<DanceTrack[]>([]);
+  const [danceNotReachedIds, setDanceNotReachedIds] = useState<string[]>([]);
+  const [danceLaunchedIds, setDanceLaunchedIds] = useState<string[]>([]);
+  const [danceSelectedCueId, setDanceSelectedCueId] = useState<string | null>(null);
+  const [danceShowBlockedByRecord, setDanceShowBlockedByRecord] = useState(false);
+  const [dancePreviousOpenRecords, setDancePreviousOpenRecords] = useState<Performance[]>([]);
+  const [danceFinishedReportId, setDanceFinishedReportId] = useState<string | null>(null);
+  const [danceNow, setDanceNow] = useState(0);
   const [cueLoadError, setCueLoadError] = useState<string | null>(null);
   const [productionLoadError, setProductionLoadError] = useState<string | null>(null);
   const [runSaveError, setRunSaveError] = useState<string | null>(null);
+  // T10/A2: one polite region for milestones only. Clock ticks never write here.
+  const [milestoneAnnouncement, setMilestoneAnnouncement] = useState("");
   const [scriptDocument, setScriptDocument] = useState<ScriptDocument | null>(null);
   const [scriptLabels, setScriptLabels] = useState<ScriptLabel[]>([]);
   const [scriptDocumentLoading, setScriptDocumentLoading] = useState(true);
@@ -210,7 +265,24 @@ export function OperationMode() {
   const activeProjectId = useUiStore((state) => state.selectedProjectId);
   const setActiveProjectId = useUiStore((state) => state.setSelectedProjectId);
   const setProductionSelectionLocked = useUiStore((state) => state.setProductionSelectionLocked);
+  const executionMode = useUiStore((state) => state.executionMode);
+  const setExecutionMode = useUiStore((state) => state.setExecutionMode);
+  const danceTrackRuntimes = useDanceRuntimeStore((state) => state.trackRuntimes);
+  const getDanceTrackState = useDanceRuntimeStore((state) => state.getTrackState);
+  const getDanceTrackActiveMs = useDanceRuntimeStore((state) => state.getTrackActiveMs);
+  const getDanceShowActiveMs = useDanceRuntimeStore((state) => state.getShowActiveMs);
+  const danceShowSample = useDanceRuntimeStore((state) => state.showSample);
+  const runtimeNotReachedIds = useDanceRuntimeStore((state) => state.notReachedIds);
   const selectedProduction = productions.find((production) => production.id === selectedProductionId);
+  // Danza comparte el carril de control de /modo-funcion; el proyecto estándar no ve nada de esta capa.
+  const danceProduction = selectedProduction?.mode === "dance" ? selectedProduction : null;
+  const danceProductionId = danceProduction?.id ?? null;
+
+  // D6: a dance session always opens in FUNCIÓN; the mode is not remembered.
+  useEffect(() => {
+    if (danceProductionId && executionMode === null) setExecutionMode("show");
+  }, [danceProductionId, executionMode, setExecutionMode]);
+
   const runStartedAt = useRef<number | null>(null);
   const elapsedBeforeRun = useRef(0);
   const launchedCountRef = useRef(0);
@@ -219,8 +291,25 @@ export function OperationMode() {
   const performanceSaveQueue = useRef<Promise<void>>(Promise.resolve());
   const isStartingFunctionRef = useRef(false);
   const isLaunchingRef = useRef(false);
+  const isFinishingDanceRef = useRef(false);
+  const isDiscardingDanceRef = useRef(false);
+  const danceLaunchedIdsRef = useRef<string[]>([]);
+  // A failed save keeps the captured instant here so a retry never replaces it.
+  const pendingDanceLaunchRef = useRef<{ event: CueLaunchEvent; elapsedMs: number } | null>(null);
   const launchButtonRef = useRef<HTMLButtonElement | null>(null);
   const preparationAlertDeadline = useRef<number | null>(null);
+
+  /** Stable so child panels can announce milestones without re-subscribing. */
+  const announceMilestone = useCallback((message: string): void => {
+    setMilestoneAnnouncement(message);
+  }, []);
+
+  // Clearing the text lets an identical milestone be announced again later.
+  useEffect(() => {
+    if (!milestoneAnnouncement) return;
+    const timer = window.setTimeout(() => setMilestoneAnnouncement(""), 1200);
+    return () => window.clearTimeout(timer);
+  }, [milestoneAnnouncement]);
 
   useEffect(() => {
     let active = true;
@@ -286,12 +375,57 @@ export function OperationMode() {
   }, [selectedProduction]);
 
   useEffect(() => {
+    if (!danceProductionId) return;
+    let active = true;
+
+    const loadDanceTracks = async () => {
+      try {
+        const tracks = await getDanceTracks(danceProductionId);
+        if (!active) return;
+        setDanceTracks(tracks);
+        useDanceRuntimeStore.getState().hydrate(danceProductionId, tracks, currentInstant());
+      } catch (loadError) {
+        console.error(loadError);
+        if (active) setDanceTracks([]);
+      }
+    };
+
+    void loadDanceTracks();
+    return () => {
+      active = false;
+    };
+  }, [danceProductionId]);
+
+  useEffect(() => {
+    return () => {
+      setDanceTracks([]);
+      setDanceNotReachedIds([]);
+      setDanceLaunchedIds([]);
+      setDanceSelectedCueId(null);
+      danceLaunchedIdsRef.current = [];
+      pendingDanceLaunchRef.current = null;
+      useDanceRuntimeStore.getState().resetAll(currentInstant());
+    };
+  }, [selectedProductionId]);
+
+  // The only dance clock: an effect, never a render read. It drives track
+  // states and countdown props for dance productions only (T5/T6).
+  useEffect(() => {
+    if (!danceProductionId) return;
+
+    const tick = () => setDanceNow(currentInstant());
+    tick();
+    const timer = window.setInterval(tick, 250);
+    return () => window.clearInterval(timer);
+  }, [danceProductionId]);
+
+  useEffect(() => {
     if (timerState !== "running") return;
 
     const interval = window.setInterval(() => {
       const start = runStartedAt.current;
       if (start !== null) {
-        setElapsedMs(elapsedBeforeRun.current + Date.now() - start);
+        setElapsedMs(elapsedBeforeRun.current + currentInstant() - start);
       }
     }, 250);
 
@@ -302,7 +436,7 @@ export function OperationMode() {
     if (breakStartedAt === null) return;
 
     const interval = window.setInterval(() => {
-      setBreakElapsedMs(Date.now() - breakStartedAt);
+      setBreakElapsedMs(currentInstant() - breakStartedAt);
     }, 250);
 
     return () => window.clearInterval(interval);
@@ -315,7 +449,7 @@ export function OperationMode() {
       const deadline = preparationAlertDeadline.current;
       if (deadline === null) return;
 
-      const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      const remaining = Math.max(0, Math.ceil((deadline - currentInstant()) / 1000));
       if (preparationAlertState === "running30" && remaining <= 15 * 60) {
         preparationAlertDeadline.current = null;
         setPreparationAlertSeconds(15 * 60);
@@ -372,8 +506,60 @@ export function OperationMode() {
     };
   }, [isLibretoOpen]);
 
+  /** Render-safe mirror of the open record used by the badge's block reason. */
+  const syncDanceOpenRecordState = (record: Performance | null): void => {
+    setDanceShowBlockedByRecord(isSessionOpenRecord(record, record?.id ?? ""));
+  };
+
+  /**
+   * D33: only the record opened by this in-memory session qualifies for
+   * closing or discarding. Never called during render: handlers read the ref.
+   */
+  const sessionOpenRecord = (): Performance | null => {
+    const record = performanceRecordRef.current;
+    return danceProduction && record?.productionId === danceProduction.id
+      && isSessionOpenRecord(record, record.id)
+      ? record
+      : null;
+  };
+
+  /** Open records from other sessions are listed but never acted upon (CL62). */
+  const reloadDancePreviousOpenRecords = useCallback(
+    async (isActive: () => boolean = () => true): Promise<void> => {
+      if (!danceProductionId) {
+        setDancePreviousOpenRecords([]);
+        return;
+      }
+      try {
+        const records = await getPerformances();
+        if (!isActive()) return;
+        const currentId = performanceRecordRef.current?.id ?? null;
+        setDancePreviousOpenRecords(records.filter((record) =>
+          record.productionId === danceProductionId
+          && Boolean(record.runReport && !record.runReport.endedAt)
+          && record.id !== currentId
+        ));
+      } catch (loadError) {
+        console.error(loadError);
+      }
+    },
+    [danceProductionId],
+  );
+
+  useEffect(() => {
+    let active = true;
+    const timer = window.setTimeout(() => {
+      void reloadDancePreviousOpenRecords(() => active);
+    }, 0);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [reloadDancePreviousOpenRecords]);
+
   const persistPerformance = (performance: Performance): Promise<boolean> => {
     performanceRecordRef.current = performance;
+    syncDanceOpenRecordState(performance);
     const saveResult = performanceSaveQueue.current.then(async () => {
       try {
         await savePerformance(performance);
@@ -389,9 +575,113 @@ export function OperationMode() {
     return saveResult;
   };
 
+  const reloadDanceTracks = async (): Promise<void> => {
+    if (!danceProductionId) return;
+    try {
+      const nextTracks = await getDanceTracks(danceProductionId);
+      setDanceTracks(nextTracks);
+      useDanceRuntimeStore.getState().syncTracks(nextTracks, currentInstant());
+    } catch (loadError) {
+      console.error(loadError);
+    }
+  };
+
+  /** Shared by the mode badge only: a confirmed toggle starts a fresh session. */
+  const resetDanceExecution = (nextMode: "rehearsal" | "show"): void => {
+    const now = currentInstant();
+    setTimerState("idle");
+    setElapsedMs(0);
+    runStartedAt.current = null;
+    elapsedBeforeRun.current = 0;
+    launchedCountRef.current = 0;
+    setLaunchedCount(0);
+    performanceRecordRef.current = null;
+    syncDanceOpenRecordState(null);
+    setProductionSelectionLocked(false);
+    setDanceLaunchedIds([]);
+    danceLaunchedIdsRef.current = [];
+    setDanceNotReachedIds([]);
+    setDanceSelectedCueId(null);
+    setDanceFinishedReportId(null);
+    pendingDanceLaunchRef.current = null;
+    breakStartedAtRef.current = null;
+    setBreakStartedAt(null);
+    setBreakElapsedMs(0);
+    isStartingFunctionRef.current = false;
+    setIsStartingFunction(false);
+    isLaunchingRef.current = false;
+    setIsLaunchingCue(false);
+    setActiveTab("operation");
+    setRunSaveError(null);
+    useDanceRuntimeStore.getState().resetAll(now);
+    setDanceNow(now);
+    setExecutionMode(nextMode);
+  };
+
+  const handleToggleExecutionMode = (): void => {
+    if (!danceProduction) return;
+    const mode = executionMode ?? "show";
+    if (mode === "show") {
+      const currentRecord = performanceRecordRef.current;
+      const hasOpenRecord = isSessionOpenRecord(currentRecord, currentRecord?.id ?? "");
+      const hasRunningTrack = Object.values(useDanceRuntimeStore.getState().trackRuntimes)
+        .some((runtime) => runtime.status === "En marcha");
+      if (hasOpenRecord || hasRunningTrack) return;
+      if (!window.confirm(
+        "Cambiar a Ensayo reiniciará la ejecución: cronómetros, tracks y lanzamientos volverán a cero. ¿Continuar?",
+      )) {
+        return;
+      }
+    } else if (!window.confirm(
+      "Cambiar a Función reiniciará la ejecución: cronómetros, tracks y lanzamientos volverán a cero. ¿Continuar?",
+    )) {
+      return;
+    }
+
+    resetDanceExecution(mode === "show" ? "rehearsal" : "show");
+    announceMilestone(mode === "show" ? "Modo Ensayo" : "Modo Función");
+  };
+
+  const handleNotReached = (ids: string[]): void => {
+    // El panel entrega la lista total; se conserva tal cual en estado local y en el store.
+    setDanceNotReachedIds(ids);
+    useDanceRuntimeStore.getState().setNotReachedIds(ids);
+  };
+
+  const handleTrackClosed = (input: {
+    trackId: string; title: string; activeMs: number;
+    startedAtMs: number;
+    endedBy: "duration" | "manual"; now: number;
+  }): void => {
+    announceMilestone(input.endedBy === "duration"
+      ? `Track ${input.title} terminado por duración`
+      : `Track ${input.title} detenido`);
+    // T8 aún no aporta `closeTrackRun`; el cierre se construye aquí y usa la cola de la 001.
+    // Sin registro abierto no se inventa uno: el cierre queda solo en memoria.
+    const currentPerformance = performanceRecordRef.current;
+    if (!currentPerformance?.runReport) return;
+
+    const trackRun = closeTrackRun({
+      trackId: input.trackId,
+      title: input.title,
+      startedAtMs: input.startedAtMs,
+      activeMs: input.activeMs,
+      endedBy: input.endedBy,
+      now: input.now,
+    });
+    const updatedPerformance: Performance = {
+      ...currentPerformance,
+      runReport: {
+        ...currentPerformance.runReport,
+        trackRuns: [...(currentPerformance.runReport.trackRuns ?? []), trackRun],
+      },
+    };
+    void persistPerformance(updatedPerformance);
+  };
+
   const toggleTimer = async () => {
     if (timerState === "running") {
-      const now = Date.now();
+      const now = currentInstant();
       const total = getElapsedAt(runStartedAt.current, elapsedBeforeRun.current, now);
       elapsedBeforeRun.current = total;
       setElapsedMs(total);
@@ -409,7 +699,7 @@ export function OperationMode() {
 
     if (timerState === "paused") {
       if (breakStartedAtRef.current !== null) return;
-      runStartedAt.current = Date.now();
+      runStartedAt.current = currentInstant();
       setTimerState("running");
       setActiveTab("operation");
       return;
@@ -427,7 +717,7 @@ export function OperationMode() {
 
     isStartingFunctionRef.current = true;
     setIsStartingFunction(true);
-    const now = Date.now();
+    const now = currentInstant();
     const previousPerformance = performanceRecordRef.current;
     const openPerformance =
       isOpenRecord(previousPerformance) &&
@@ -447,6 +737,7 @@ export function OperationMode() {
     if (!saved) {
       if (performanceRecordRef.current?.id === performance.id) {
         performanceRecordRef.current = previousPerformance;
+        syncDanceOpenRecordState(previousPerformance);
       }
       if (!hasOpenRecord) setProductionSelectionLocked(false);
       return;
@@ -463,7 +754,7 @@ export function OperationMode() {
     const currentPerformance = performanceRecordRef.current;
     if (!currentPerformance?.runReport) return;
 
-    const now = Date.now();
+    const now = currentInstant();
     const activeBreakStart = breakStartedAtRef.current;
     if (activeBreakStart !== null) {
       const breaks = [...currentPerformance.runReport.breaks];
@@ -485,6 +776,7 @@ export function OperationMode() {
       runStartedAt.current = now;
       setTimerState("running");
       setActiveTab("operation");
+      announceMilestone("Descanso finalizado");
       return;
     }
 
@@ -508,6 +800,7 @@ export function OperationMode() {
     breakStartedAtRef.current = now;
     setBreakStartedAt(now);
     setBreakElapsedMs(0);
+    announceMilestone("Descanso iniciado");
     void persistPerformance(updatedPerformance);
   };
 
@@ -547,11 +840,174 @@ export function OperationMode() {
     }
   };
 
-  const handleLaunchCue = async () => {
+  const handleLaunchCue = async (cueOverride?: Cue) => {
     // Synchronous guard: while a launch is being saved, further activations are
     // ignored instead of queued (RF7). The button `disabled` state alone is not
     // enough, because React state updates are asynchronous.
     if (isLaunchingRef.current) return;
+
+    if (danceProduction) {
+      if (!cues || timerState === "finished") return;
+      const cue = cueOverride ?? danceCandidate;
+      if (!cue) return;
+
+      const runtime = useDanceRuntimeStore.getState();
+      const now = currentInstant();
+      const mode = executionMode ?? "show";
+      if (mode === "show" && cue.id !== danceCandidate?.id) {
+        setRunSaveError(LAUNCH_REASON_NOT_NEXT);
+        return;
+      }
+      const resolved = resolveCueTiming(cue, danceSchedule);
+      const trackState = resolved.trackId ? runtime.getTrackState(resolved.trackId, now) : undefined;
+      const showSample = runtime.showSample;
+      const availability = getLaunchAvailability({
+        candidate: cue,
+        trackState,
+        showRunning: showSample !== null && !showSample.pausedAt,
+        mode,
+        now,
+      });
+      if (!availability.launchable) {
+        // One aria-live/alert region, shared with the inherited save errors.
+        setRunSaveError(availability.reason ?? null);
+        return;
+      }
+
+      const nextLaunchedIds = mode === "rehearsal"
+        ? [...new Set([...danceLaunchedIdsRef.current, cue.id])]
+        : [...danceLaunchedIdsRef.current, cue.id];
+      const nextCount = mode === "rehearsal"
+        ? Math.min(Math.max(launchedCountRef.current, nextLaunchedIds.length), cues.length)
+        : Math.min(launchedCountRef.current + 1, cues.length);
+      if (mode === "show" && (nextLaunchedIds.length === danceLaunchedIdsRef.current.length
+        || nextCount === launchedCountRef.current)) return;
+
+      const isFinished = !getNextCandidate({
+        cues,
+        schedule: danceSchedule,
+        launchedIds: nextLaunchedIds,
+        notReachedIds: danceExcludedIds,
+        now: 0,
+      });
+      const elapsed = getElapsedAt(runStartedAt.current, elapsedBeforeRun.current, now);
+
+      isLaunchingRef.current = true;
+      setIsLaunchingCue(true);
+      setRunSaveError(null);
+
+      if (mode === "rehearsal") {
+        // D7: rehearsal changes only in-memory state: no record and no lock.
+        pendingDanceLaunchRef.current = null;
+        danceLaunchedIdsRef.current = nextLaunchedIds;
+        setDanceLaunchedIds(nextLaunchedIds);
+        launchedCountRef.current = nextCount;
+        setLaunchedCount(nextCount);
+        announceMilestone(`Cue ${cue.identifier} lanzada`);
+        isLaunchingRef.current = false;
+        setIsLaunchingCue(false);
+        return;
+      }
+
+      const previousRecord = performanceRecordRef.current;
+      const hasOpenRecord = Boolean(previousRecord
+        && previousRecord.productionId === danceProduction.id
+        && isSessionOpenRecord(previousRecord, previousRecord.id));
+      const isFirstLaunch = !hasOpenRecord;
+
+      // Instant and active offsets are captured before saving: the snapshot and
+      // its deviation are fixed once (D35/RF23).
+      const trackActiveMs = resolved.trackId && trackState && trackState.status !== "Pendiente"
+        ? runtime.getTrackActiveMs(resolved.trackId, now)
+        : undefined;
+      const showActiveMs = showSample ? runtime.getShowActiveMs(now) : undefined;
+      const targetOffsetMs = resolved.status === "linked"
+        ? resolved.trackOffsetMs
+        : resolved.status === "absolute" ? resolved.atMs : undefined;
+      const actualOffsetMs = resolved.status === "linked"
+        ? trackActiveMs
+        : resolved.status === "absolute" ? showActiveMs : undefined;
+
+      const retry = pendingDanceLaunchRef.current;
+      const event = retry?.event ?? buildCueLaunchEvent({
+        cue,
+        launchedAtMs: now,
+        elapsedMs: elapsed,
+        ...(showActiveMs !== undefined ? { showActiveMs } : {}),
+        ...(resolved.trackStartAtMs !== undefined
+          ? { trackStartAt: new Date(resolved.trackStartAtMs).toISOString() }
+          : {}),
+        ...(targetOffsetMs !== undefined ? { targetOffsetMs } : {}),
+        ...(actualOffsetMs !== undefined ? { actualOffsetMs } : {}),
+        now,
+      });
+      const launchElapsedMs = retry?.elapsedMs ?? elapsed;
+      pendingDanceLaunchRef.current = { event, elapsedMs: launchElapsedMs };
+
+      const revertDanceLaunch = () => {
+        performanceRecordRef.current = previousRecord;
+        syncDanceOpenRecordState(previousRecord);
+        if (isFirstLaunch) setProductionSelectionLocked(false);
+        isLaunchingRef.current = false;
+        setIsLaunchingCue(false);
+        // The pending snapshot is kept so a retry reuses the original instant.
+      };
+
+      let launchPerformance: Performance;
+      try {
+        const recordNow = Date.parse(event.launchedAt);
+        const base: Performance = hasOpenRecord && previousRecord
+          ? previousRecord
+          : {
+              ...openDanceRecord({
+                productionId: danceProduction.id,
+                totalCues: cues.length,
+                now: recordNow,
+              }),
+              title: danceProduction.title,
+            };
+        launchPerformance = appendLaunch({
+          performance: base,
+          event,
+          isFinished,
+          elapsedMs: launchElapsedMs,
+          now: recordNow,
+        });
+      } catch (buildError) {
+        console.error(buildError);
+        revertDanceLaunch();
+        setRunSaveError("No se pudo crear el registro de la función. Vuelve a intentar el lanzamiento.");
+        return;
+      }
+
+      const saved = await persistPerformance(launchPerformance);
+      if (!saved) {
+        revertDanceLaunch();
+        return;
+      }
+
+      pendingDanceLaunchRef.current = null;
+      if (isFirstLaunch) setProductionSelectionLocked(true);
+      danceLaunchedIdsRef.current = nextLaunchedIds;
+      setDanceLaunchedIds(nextLaunchedIds);
+      launchedCountRef.current = nextCount;
+      setLaunchedCount(nextCount);
+      announceMilestone(isFinished
+        ? `Cue ${cue.identifier} lanzada. Función finalizada`
+        : `Cue ${cue.identifier} lanzada`);
+
+      if (isFinished) {
+        runStartedAt.current = null;
+        elapsedBeforeRun.current = launchElapsedMs;
+        setElapsedMs(launchElapsedMs);
+        setTimerState("finished");
+        setProductionSelectionLocked(false);
+      }
+
+      isLaunchingRef.current = false;
+      setIsLaunchingCue(false);
+      return;
+    }
 
     const cueCount = cues?.length ?? null;
     const canLaunch = canLaunchNextCue({
@@ -570,7 +1026,7 @@ export function OperationMode() {
 
     const previousRecord = performanceRecordRef.current;
     const isFirstLaunch = !previousRecord?.runReport;
-    const now = Date.now();
+    const now = currentInstant();
     const elapsed = getElapsedAt(runStartedAt.current, elapsedBeforeRun.current, now);
     const isFinished = nextCount === cueCount;
 
@@ -587,6 +1043,7 @@ export function OperationMode() {
     //   memory stay aligned and the production selection keeps its lock.
     const revertFailedLaunch = () => {
       performanceRecordRef.current = previousRecord;
+      syncDanceOpenRecordState(previousRecord);
       if (isFirstLaunch) setProductionSelectionLocked(false);
       isLaunchingRef.current = false;
       setIsLaunchingCue(false);
@@ -637,6 +1094,10 @@ export function OperationMode() {
 
     launchedCountRef.current = nextCount;
     setLaunchedCount(nextCount);
+    const launchedIdentifier = cues?.[nextCount - 1]?.identifier ?? String(nextCount);
+    announceMilestone(isFinished
+      ? `Cue ${launchedIdentifier} lanzada. Función finalizada`
+      : `Cue ${launchedIdentifier} lanzada`);
 
     if (isFinished) {
       runStartedAt.current = null;
@@ -648,6 +1109,119 @@ export function OperationMode() {
 
     isLaunchingRef.current = false;
     setIsLaunchingCue(false);
+  };
+
+  /** T8: close only this session's open record, with its still-open track runs. */
+  const handleFinishDanceShow = async (): Promise<void> => {
+    if (!danceProduction || danceMode !== "show" || isFinishingDanceRef.current) return;
+    const record = sessionOpenRecord();
+    if (!record) return;
+
+    isFinishingDanceRef.current = true;
+    try {
+      const pendingCues = danceSequence.filter((cue) =>
+        !danceLaunchedIds.includes(cue.id) && !danceExcludedIds.includes(cue.id)
+      );
+      if (pendingCues.length > 0 && !window.confirm(
+        `Se cerrará la función con ${pendingCues.length} cues sin lanzar; quedarán como no alcanzadas.`
+      )) {
+        return;
+      }
+
+      const now = currentInstant();
+      const elapsed = getElapsedAt(runStartedAt.current, elapsedBeforeRun.current, now);
+      const runtime = useDanceRuntimeStore.getState();
+      const trackRuns: TrackRun[] = [];
+      for (const [trackId, trackRuntime] of Object.entries(runtime.trackRuntimes)) {
+        if (trackRuntime.status !== "En marcha" && trackRuntime.status !== "Pausado") continue;
+        const activeMs = runtime.getTrackActiveMs(trackId, now);
+        const parsedStart = trackRuntime.startedAtMs
+          ?? (trackRuntime.sample ? Date.parse(trackRuntime.sample.startedAt) : Number.NaN);
+        trackRuns.push(closeTrackRun({
+          trackId,
+          title: danceTracks.find((track) => track.id === trackId)?.title ?? trackId,
+          startedAtMs: Number.isFinite(parsedStart) ? parsedStart : now - activeMs,
+          activeMs,
+          endedBy: "manual",
+          now,
+        }));
+      }
+
+      const closed = finishPerformance({ performance: record, trackRuns, elapsedMs: elapsed, now });
+      setRunSaveError(null);
+      const saved = await persistPerformance(closed);
+      if (!saved) {
+        // The open record, the production lock and the running clocks stay put.
+        performanceRecordRef.current = record;
+        syncDanceOpenRecordState(record);
+        setRunSaveError(DANCE_FINISH_ERROR);
+        return;
+      }
+
+      runStartedAt.current = null;
+      elapsedBeforeRun.current = elapsed;
+      setElapsedMs(elapsed);
+      setTimerState("finished");
+      runtime.pauseShow(now);
+      for (const track of danceTracks) {
+        if (runtime.getTrackState(track.id, now).status !== "Terminado") {
+          runtime.finishTrack(track.id, "manual", now);
+        }
+      }
+      // The report derives this from `endedAt`; the live schedule mirrors it.
+      const pendingWithTarget = pendingCues.filter((cue) => {
+        const resolved = resolveCueTiming(cue, danceSchedule);
+        return resolved.status === "linked" || resolved.status === "absolute";
+      });
+      handleNotReached([...new Set([
+        ...danceExcludedIds,
+        ...pendingWithTarget.map((cue) => cue.id),
+      ])]);
+      setProductionSelectionLocked(false);
+      setDanceFinishedReportId(closed.id);
+      announceMilestone("Función finalizada");
+      await reloadDancePreviousOpenRecords();
+    } finally {
+      isFinishingDanceRef.current = false;
+    }
+  };
+
+  /** T8: a discard really deletes the record and resets the whole session. */
+  const handleDiscardDanceShow = async (): Promise<void> => {
+    if (!danceProduction || danceMode !== "show" || isDiscardingDanceRef.current) return;
+    const record = sessionOpenRecord();
+    if (!record) return;
+
+    isDiscardingDanceRef.current = true;
+    try {
+      if (!window.confirm(
+        "Se anulará esta función: se borrará su registro y no contará en métricas ni en informes."
+      )) {
+        return;
+      }
+      try {
+        await deletePerformance(record.id);
+      } catch (deleteError) {
+        console.error(deleteError);
+        setRunSaveError(DANCE_DISCARD_ERROR);
+        return;
+      }
+      setDanceFinishedReportId(null);
+      pendingDanceLaunchRef.current = null;
+      resetDanceExecution("show");
+      announceMilestone("Función descartada");
+      await reloadDancePreviousOpenRecords();
+    } finally {
+      isDiscardingDanceRef.current = false;
+    }
+  };
+
+  /** Notes are the only editable cue field during a show; timing is untouched. */
+  const handleSaveCueNote = async (cue: Cue, observations: string): Promise<void> => {
+    await saveCue({ ...cue, observations });
+    setCues((current) => current?.map((item) => (
+      item.id === cue.id ? { ...item, observations } : item
+    )) ?? current);
   };
 
   const handleProductionChange = useCallback((productionId: string) => {
@@ -668,6 +1242,13 @@ export function OperationMode() {
     runStartedAt.current = null;
     setLaunchedCount(0);
     launchedCountRef.current = 0;
+    setDanceLaunchedIds([]);
+    danceLaunchedIdsRef.current = [];
+    setDanceNotReachedIds([]);
+    setDanceSelectedCueId(null);
+    setDanceFinishedReportId(null);
+    setDancePreviousOpenRecords([]);
+    pendingDanceLaunchRef.current = null;
     setBreakStartedAt(null);
     breakStartedAtRef.current = null;
     setBreakElapsedMs(0);
@@ -691,8 +1272,10 @@ export function OperationMode() {
       props: false,
     });
     performanceRecordRef.current = null;
+    syncDanceOpenRecordState(null);
+    setExecutionMode(null);
     setRunSaveError(null);
-  }, [setActiveProjectId, setProductionSelectionLocked]);
+  }, [setActiveProjectId, setExecutionMode, setProductionSelectionLocked]);
 
   useEffect(() => {
     if (selectedProductionId === activeProjectId || (activeProjectId && productions.length === 0)) {
@@ -709,11 +1292,11 @@ export function OperationMode() {
 
   const handlePreparationAlert = () => {
     if (preparationAlertState === "idle") {
-      preparationAlertDeadline.current = Date.now() + 30 * 60 * 1000;
+      preparationAlertDeadline.current = currentInstant() + 30 * 60 * 1000;
       setPreparationAlertSeconds(30 * 60);
       setPreparationAlertState("running30");
     } else if (preparationAlertState === "waiting15") {
-      preparationAlertDeadline.current = Date.now() + preparationAlertSeconds * 1000;
+      preparationAlertDeadline.current = currentInstant() + preparationAlertSeconds * 1000;
       setPreparationAlertState("running15");
     } else if (preparationAlertState === "waiting5") {
       preparationAlertDeadline.current = null;
@@ -740,13 +1323,122 @@ export function OperationMode() {
   const isPreparationAlertWaiting =
     preparationAlertState === "waiting15" || preparationAlertState === "waiting5";
 
-  const launchedCues = cues?.slice(Math.max(0, launchedCount - 2), launchedCount) ?? [];
-  const nextCue = cues?.[launchedCount];
-  const followingCues = cues?.slice(launchedCount + 1, launchedCount + 4) ?? [];
+  // Danza derives its sequence from the pure schedule. Standard keeps the
+  // inherited positional sequence untouched.
+  const danceMode = executionMode ?? "show";
+  const danceSchedule = buildSchedule({ tracks: danceTracks, cues: cues ?? [], now: 0 });
+  const danceSequence = [...danceSchedule.timedCues, ...danceSchedule.untimedCues];
+  const danceExcludedIds = [...new Set([...danceNotReachedIds, ...runtimeNotReachedIds])];
+  const danceCandidate = getNextCandidate({
+    cues: cues ?? [],
+    schedule: danceSchedule,
+    launchedIds: danceLaunchedIds,
+    notReachedIds: danceExcludedIds,
+    now: 0,
+  });
+  // Rehearsal may point at any cue; a show always follows the pure candidate.
+  const danceLaunchCue = danceProduction
+    ? (danceMode === "rehearsal"
+        ? danceSequence.find((cue) => cue.id === danceSelectedCueId) ?? danceCandidate
+        : danceCandidate)
+    : undefined;
+  const danceCandidateIndex = danceCandidate
+    ? danceSequence.findIndex((item) => item.id === danceCandidate.id)
+    : -1;
+  const danceLaunchIndex = danceLaunchCue
+    ? danceSequence.findIndex((item) => item.id === danceLaunchCue.id)
+    : -1;
+  const danceResolved = danceLaunchCue ? resolveCueTiming(danceLaunchCue, danceSchedule) : undefined;
+  const danceTrackId = danceResolved?.status === "linked" ? danceResolved.trackId : undefined;
+  const danceTrackState = danceTrackId ? getDanceTrackState(danceTrackId, danceNow) : undefined;
+  const danceTrackActiveMs = danceTrackId && danceTrackState?.status !== "Pendiente"
+    ? getDanceTrackActiveMs(danceTrackId, danceNow)
+    : undefined;
+  // No sample means no reference: a missing show clock must not invent `0`.
+  const danceShowActiveMs = danceShowSample ? getDanceShowActiveMs(danceNow) : undefined;
+  const danceShowRunning = danceShowSample !== null && !danceShowSample.pausedAt;
+  const danceAvailability = danceLaunchCue
+    ? getLaunchAvailability({
+        candidate: danceLaunchCue,
+        trackState: danceTrackState,
+        showRunning: danceShowRunning,
+        mode: danceMode,
+        now: danceNow,
+      })
+    : undefined;
+  const danceLaunchDisabledReason = danceAvailability && !danceAvailability.launchable
+    ? danceAvailability.reason
+    : undefined;
+
+  // CL27: the badge exposes the block before the control is ever activated.
+  const danceToggleReason = (() => {
+    if (!danceProduction || danceMode !== "show") return undefined;
+    const hasOpenRecord = danceShowBlockedByRecord;
+    const hasRunningTrack = Object.values(danceTrackRuntimes)
+      .some((runtime) => runtime.status === "En marcha");
+    if (hasOpenRecord && hasRunningTrack) {
+      return "Cierra la función y detén los tracks antes de cambiar a Ensayo.";
+    }
+    if (hasOpenRecord) return "No se puede cambiar a Ensayo con una función abierta.";
+    if (hasRunningTrack) return "No se puede cambiar a Ensayo con un track en marcha.";
+    return undefined;
+  })();
+  const danceFinishReason = danceProduction && danceMode === "show" && !danceShowBlockedByRecord
+    ? Object.values(danceTrackRuntimes).some((runtime) => runtime.status === "En marcha")
+      ? "Inicia la función o lanza una cue para poder finalizarla."
+      : "No hay ninguna función en curso."
+    : undefined;
+  const showOperationTabs = timerState === "paused" || Boolean(danceProduction);
+
+  // Vía 1 (last cue) closes the record inside the inherited launch flow; the
+  // report link becomes available only once that closure is actually saved.
+  useEffect(() => {
+    if (!danceProduction || danceMode !== "show" || timerState !== "finished") return;
+    const record = performanceRecordRef.current;
+    if (record?.runReport?.endedAt && record.id !== danceFinishedReportId) {
+      setDanceFinishedReportId(record.id);
+    }
+  }, [danceProduction, danceFinishedReportId, danceMode, timerState]);
+
+  const launchedCues = danceProduction
+    ? danceSequence.filter((cue) => danceLaunchedIds.includes(cue.id)).slice(-2)
+    : cues?.slice(Math.max(0, launchedCount - 2), launchedCount) ?? [];
+  const nextCue = danceProduction ? danceLaunchCue : cues?.[launchedCount];
+  const launchCueReason = (() => {
+    if (timerState === "finished") return "La función ya ha finalizado.";
+    if (isLaunchingCue) return "Espera a que termine el lanzamiento anterior.";
+    if (!nextCue) return "No hay ninguna cue pendiente de lanzar.";
+    return danceProduction ? danceLaunchDisabledReason : undefined;
+  })();
+  const nextCueNumber = danceProduction && danceLaunchIndex >= 0
+    ? danceLaunchIndex + 1
+    : launchedCount + 1;
+  const followingCues = danceProduction && danceCandidateIndex >= 0
+    ? danceSequence.slice(danceCandidateIndex + 1, danceCandidateIndex + 4)
+    : cues?.slice(launchedCount + 1, launchedCount + 4) ?? [];
   const cueProgress = cues?.length ? Math.round((launchedCount / cues.length) * 100) : 0;
   const isSequenceAvailable =
     Boolean(selectedProductionId) && !cueLoadError && cues !== null && cues.length > 0;
   const canStartFunction = Boolean(selectedProductionId && cues?.length);
+  // T10/A2: every disabled control exposes the reason next to it.
+  const startFunctionReason = (() => {
+    if (timerState === "finished") return "La función ya ha finalizado.";
+    if (isStartingFunction) return "Iniciando la función.";
+    if (isLaunchingCue) return "Espera a que termine el lanzamiento.";
+    if (breakStartedAt !== null) return "Retoma el descanso antes de continuar.";
+    if (timerState === "idle" && !canStartFunction) {
+      return "Crea o selecciona una producción con cues para iniciar la función.";
+    }
+    return undefined;
+  })();
+  const breakFunctionReason = breakStartedAt === null
+    && timerState !== "running"
+    && timerState !== "paused"
+    ? "Inicia la función para poder registrar un descanso."
+    : undefined;
+  const libretoReason = !selectedProductionId
+    ? "Selecciona una producción para ver su libreto."
+    : undefined;
   const activeScriptCue = nextCue ?? cues?.[launchedCount - 1];
   const activeScriptCuePage = getCueScriptPage(activeScriptCue, scriptLabels);
   const requestedScriptPage =
@@ -795,6 +1487,10 @@ export function OperationMode() {
         ? "fixed inset-0 z-50 flex h-dvh w-screen flex-col overflow-hidden rounded-none border-0 bg-slate-950 p-3 sm:p-4"
         : ""
     }`}>
+      {/* T10/A2: the only polite milestone region. Save errors keep their role="alert". */}
+      <p aria-live="polite" aria-atomic="true" className="sr-only">
+        {milestoneAnnouncement}
+      </p>
       <div className={`mb-5 flex flex-wrap items-center justify-between gap-3 ${isLibretoOpen ? "mb-3 shrink-0" : ""}`}>
         <div>
           <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Modo función</p>
@@ -807,13 +1503,14 @@ export function OperationMode() {
         </div>
       <div className="flex flex-wrap items-center gap-3">
         {!selectedProductionId && (
-          <Link href="/proyectos" className="min-h-10 rounded-xl border border-cyan-500/30 px-3 py-2 text-sm text-cyan-200 hover:bg-cyan-500/10">
+          <Link href="/proyectos" style={scaledSmStyle} className="inline-flex min-h-11 min-w-11 items-center rounded-xl border border-cyan-500/30 px-3 py-2 text-sm text-cyan-200 hover:bg-cyan-500/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300">
             Crear proyecto
           </Link>
         )}
           <button
             type="button"
           disabled={!selectedProductionId}
+          aria-describedby={libretoReason ? DANCE_LIBRETO_REASON_ID : undefined}
             aria-pressed={isLibretoOpen}
             aria-controls="libreto-performance-view"
             aria-keyshortcuts={isLibretoOpen ? "Escape" : undefined}
@@ -821,7 +1518,8 @@ export function OperationMode() {
               if (!isLibretoOpen) setActiveTab("operation");
               setIsLibretoOpen((open) => !open);
             }}
-            className={`inline-flex min-h-10 items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300 ${
+            style={scaledSmStyle}
+            className={`inline-flex min-h-11 min-w-11 items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300 ${
               isLibretoOpen
                 ? "border-cyan-300 bg-cyan-400 text-slate-950"
                 : "border-slate-600 bg-slate-900 text-slate-200 hover:border-slate-400"
@@ -830,6 +1528,11 @@ export function OperationMode() {
             <BookOpenText className="h-4 w-4" />
             Libreto
           </button>
+          {libretoReason && (
+            <p id={DANCE_LIBRETO_REASON_ID} className="w-full min-w-0 break-words text-[11px] text-amber-300">
+              {libretoReason}
+            </p>
+          )}
           <span className={`rounded-full border px-3 py-1.5 text-sm ${
             timerState === "running"
               ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
@@ -848,6 +1551,16 @@ export function OperationMode() {
                   : "En espera"}
           </span>
         </div>
+        {danceProduction && (
+          <div className="w-full min-w-0">
+            <ModeBadge
+              mode={danceMode}
+              canToggle={!danceToggleReason}
+              toggleReason={danceToggleReason}
+              onToggle={handleToggleExecutionMode}
+            />
+          </div>
+        )}
       </div>
 
       <div className={`grid gap-5 ${
@@ -880,18 +1593,19 @@ export function OperationMode() {
           }`}
         >
           <section className="rounded-2xl border border-slate-700 bg-slate-950 p-5">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
+            <div className="flex min-w-0 flex-wrap items-center justify-between gap-4">
+              <div className="min-w-0">
                 <p className="text-sm text-slate-400">Cronómetro</p>
                 <p
-                  className="mt-2 font-mono text-4xl font-semibold tabular-nums text-white sm:text-5xl"
+                  style={scaledClockStyle}
+                  className="mt-2 min-w-0 max-w-full font-mono text-4xl font-semibold tabular-nums text-white sm:text-5xl"
                   aria-label={`Tiempo de función ${formatElapsedTime(elapsedMs)}`}
                   aria-live="off"
                 >
                   {formatElapsedTime(elapsedMs)}
                 </p>
               </div>
-              <div className="flex flex-col gap-2">
+              <div className="flex min-w-0 flex-col gap-2">
                 <button
                   type="button"
                   onClick={toggleTimer}
@@ -913,7 +1627,9 @@ export function OperationMode() {
                             ? "Iniciando función"
                             : "Iniciar función"
                   }
-                  className={`inline-flex min-h-12 items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50 ${
+                  aria-describedby={startFunctionReason ? DANCE_START_REASON_ID : undefined}
+                  style={scaledSmStyle}
+                  className={`inline-flex min-h-12 min-w-11 items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50 ${
                     timerState === "running"
                       ? "bg-amber-600 hover:bg-amber-500 focus-visible:outline-amber-300"
                       : "bg-emerald-600 hover:bg-emerald-500 focus-visible:outline-emerald-300"
@@ -942,16 +1658,29 @@ export function OperationMode() {
                     timerState !== "running" &&
                     timerState !== "paused"
                   }
-                  className="inline-flex min-h-10 items-center justify-center rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-200 hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-describedby={breakFunctionReason ? DANCE_BREAK_REASON_ID : undefined}
+                  style={scaledSmStyle}
+                  className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-200 hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
                 >
                   {breakStartedAt === null ? "Descanso" : "Retomamos"}
                 </button>
+                {startFunctionReason && (
+                  <p id={DANCE_START_REASON_ID} className="min-w-0 break-words text-[11px] text-amber-300">
+                    {startFunctionReason}
+                  </p>
+                )}
+                {breakFunctionReason && (
+                  <p id={DANCE_BREAK_REASON_ID} className="min-w-0 break-words text-[11px] text-amber-300">
+                    {breakFunctionReason}
+                  </p>
+                )}
               </div>
             </div>
 
             {breakStartedAt !== null && (
               <p
-                className="mt-3 text-right font-mono text-lg tabular-nums text-amber-200"
+                style={scaledBreakStyle}
+                className="mt-3 min-w-0 max-w-full break-words text-right font-mono text-lg tabular-nums text-amber-200"
                 aria-label={`Duración del descanso ${formatElapsedTime(breakElapsedMs)}`}
                 aria-live="off"
               >
@@ -960,9 +1689,11 @@ export function OperationMode() {
             )}
 
             <div className="mt-5">
-              <div className="mb-2 flex items-center justify-between text-sm">
-                <span className="text-slate-400">Progreso de cues</span>
-                <span className="font-semibold tabular-nums text-cyan-200">
+              <div className="mb-2 flex min-w-0 flex-wrap items-center justify-between gap-2 text-sm">
+                <span style={scaledSmStyle} className="min-w-0 break-words text-slate-400">
+                  Progreso de cues
+                </span>
+                <span style={scaledSmStyle} className="min-w-0 break-words font-semibold tabular-nums text-cyan-200">
                   {launchedCount}/{cues?.length ?? 0} · {cueProgress}%
                 </span>
               </div>
@@ -988,7 +1719,7 @@ export function OperationMode() {
                   <button
                     type="button"
                     onClick={() => {
-                      const occurredAt = Date.now();
+                      const occurredAt = currentInstant();
                       setQuickIncidentSaved(false);
                       setQuickIncidentMoment({
                         occurredAt,
@@ -996,7 +1727,8 @@ export function OperationMode() {
                       });
                       setIsQuickIncidentOpen(true);
                     }}
-                    className="min-h-10 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-200 hover:bg-rose-500/20"
+                    style={scaledSmStyle}
+                    className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-200 hover:bg-rose-500/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-300"
                   >
                     Incidencia rápida
                   </button>
@@ -1021,17 +1753,25 @@ export function OperationMode() {
                       <button
                         type="submit"
                         disabled={isSavingQuickIncident}
-                        className="min-h-10 rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500 disabled:cursor-wait disabled:opacity-50"
+                        aria-describedby={isSavingQuickIncident ? DANCE_INCIDENT_REASON_ID : undefined}
+                        style={scaledSmStyle}
+                        className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-500 disabled:cursor-wait disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-300"
                       >
                         {isSavingQuickIncident ? "Guardando…" : "Guardar incidencia"}
                       </button>
+                      {isSavingQuickIncident && (
+                        <p id={DANCE_INCIDENT_REASON_ID} className="min-w-0 break-words text-[11px] text-amber-300">
+                          Guardando la incidencia.
+                        </p>
+                      )}
                       <button
                         type="button"
                         onClick={() => {
                           setIsQuickIncidentOpen(false);
                           setQuickIncidentMoment(null);
                         }}
-                        className="min-h-10 rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800"
+                        style={scaledSmStyle}
+                        className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-300"
                       >
                         Cancelar
                       </button>
@@ -1047,18 +1787,113 @@ export function OperationMode() {
             )}
 
             {runSaveError && (
-              <p role="alert" className="mt-3 text-sm text-rose-300">{runSaveError}</p>
+              <div role="alert" className="mt-3 space-y-2">
+                <p className="text-sm text-rose-300">{runSaveError}</p>
+                {(runSaveError === DANCE_FINISH_ERROR || runSaveError === DANCE_DISCARD_ERROR) && (
+                  <button
+                    type="button"
+                    onClick={() => void (runSaveError === DANCE_FINISH_ERROR
+                      ? handleFinishDanceShow()
+                      : handleDiscardDanceShow())}
+                    className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-200 hover:bg-rose-500/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-300"
+                  >
+                    {runSaveError === DANCE_FINISH_ERROR
+                      ? "Reintentar finalización"
+                      : "Reintentar descarte"}
+                  </button>
+                )}
+              </div>
             )}
           </section>
 
-          {timerState === "paused" && (
+          {danceProduction && danceMode === "show" && (
+            <section
+              aria-label="Cierre de función"
+              className="rounded-2xl border border-slate-700 bg-slate-950 p-5"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold text-cyan-200">Cierre de función</h3>
+                {danceFinishedReportId && (
+                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300">
+                    Finalizada
+                  </span>
+                )}
+              </div>
+              <div className="mt-4 flex flex-wrap gap-3">
+                <button
+                  type="button"
+                  onClick={() => void handleFinishDanceShow()}
+                  disabled={!danceShowBlockedByRecord}
+                  aria-describedby={danceFinishReason ? DANCE_FINISH_REASON_ID : undefined}
+                  className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-4 py-2 text-sm font-semibold text-cyan-100 hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+                >
+                  Finalizar función
+                </button>
+                {danceShowBlockedByRecord && (
+                  <button
+                    type="button"
+                    onClick={() => void handleDiscardDanceShow()}
+                    className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-200 hover:bg-rose-500/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-300"
+                  >
+                    Descartar función
+                  </button>
+                )}
+                {danceFinishedReportId && (
+                  <Link
+                    href={`/reportes/imprimir?performance=${danceFinishedReportId}`}
+                    className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-slate-600 bg-slate-900 px-4 py-2 text-sm font-semibold text-cyan-200 hover:border-cyan-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+                  >
+                    Ver informe
+                  </Link>
+                )}
+              </div>
+              {danceFinishReason && (
+                <p id={DANCE_FINISH_REASON_ID} className="mt-3 text-xs text-amber-300">
+                  {danceFinishReason}
+                </p>
+              )}
+              {dancePreviousOpenRecords.length > 0 && (
+                <div className="mt-4 rounded-xl border border-slate-700 bg-slate-900/60 px-3 py-2">
+                  <p className="text-xs font-semibold text-slate-300">Registros de sesiones anteriores</p>
+                  <ul className="mt-1 space-y-1">
+                    {dancePreviousOpenRecords.map((record) => (
+                      <li key={record.id} className="text-xs text-slate-400">
+                        registro de una sesión anterior: {record.title} · {record.date} {record.time}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </section>
+          )}
+
+          {danceProduction && (
+            <div className="space-y-4">
+              <ShowClock />
+              <TrackPanel
+                productionId={danceProduction.id}
+                tracks={danceTracks}
+                cues={cues ?? []}
+                mode={executionMode ?? "show"}
+                notReachedIds={danceNotReachedIds}
+                onTracksChanged={() => void reloadDanceTracks()}
+                onTrackClosed={handleTrackClosed}
+                onNotReached={handleNotReached}
+                onAnnounce={announceMilestone}
+              />
+            </div>
+          )}
+
+          {showOperationTabs && (
             <div role="tablist" aria-label="Pestañas de función" className="flex flex-wrap gap-3 border-b border-slate-700">
               <button
+                id="operation-tab-operation"
                 type="button"
                 role="tab"
+                aria-controls="operation-panel-operation"
                 aria-selected={activeTab === "operation"}
                 onClick={() => setActiveTab("operation")}
-                className={`border-b-2 px-3 py-2 text-sm ${
+                className={`min-h-11 min-w-11 border-b-2 px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300 ${
                   activeTab === "operation"
                     ? "border-cyan-400 text-cyan-200"
                     : "border-transparent text-slate-400 hover:text-white"
@@ -1066,12 +1901,31 @@ export function OperationMode() {
               >
                 Operación
               </button>
+              {danceProduction && (
+                <button
+                  id="operation-tab-document"
+                  type="button"
+                  role="tab"
+                  aria-controls="operation-panel-document"
+                  aria-selected={activeTab === "document"}
+                  onClick={() => setActiveTab("document")}
+                  className={`min-h-11 min-w-11 border-b-2 px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300 ${
+                    activeTab === "document"
+                      ? "border-cyan-400 text-cyan-200"
+                      : "border-transparent text-slate-400 hover:text-white"
+                  }`}
+                >
+                  Documento
+                </button>
+              )}
               <button
+                id="operation-tab-announcements"
                 type="button"
                 role="tab"
+                aria-controls="operation-panel-announcements"
                 aria-selected={activeTab === "announcements"}
                 onClick={() => setActiveTab("announcements")}
-                className={`border-b-2 px-3 py-2 text-sm font-semibold ${
+                className={`min-h-11 min-w-11 border-b-2 px-3 py-2 text-sm font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-300 ${
                   activeTab === "announcements"
                     ? "border-rose-400 text-rose-200"
                     : "border-transparent text-slate-300 hover:text-white"
@@ -1082,8 +1936,13 @@ export function OperationMode() {
             </div>
           )}
 
-          {timerState === "paused" && activeTab === "announcements" ? (
-            <section role="tabpanel" className="rounded-2xl border border-rose-500/25 bg-rose-500/5 p-5">
+          {showOperationTabs && activeTab === "announcements" ? (
+            <section
+              id="operation-panel-announcements"
+              role="tabpanel"
+              aria-labelledby="operation-tab-announcements"
+              className="rounded-2xl border border-rose-500/25 bg-rose-500/5 p-5"
+            >
               <div className="flex items-center gap-3">
                 <BellRing className="h-5 w-5 text-rose-300" />
                 <h3 className="font-semibold text-white">AVISOS EN SALA</h3>
@@ -1092,16 +1951,46 @@ export function OperationMode() {
                 Este espacio queda preparado para configurar los avisos al público.
               </p>
             </section>
+          ) : showOperationTabs && activeTab === "document" && danceProduction ? (
+            <section
+              id="operation-panel-document"
+              role="tabpanel"
+              aria-labelledby="operation-tab-document"
+              className="min-w-0"
+            >
+              <LiveSchedule
+                cues={cues ?? []}
+                schedule={danceSchedule}
+                launchedIds={danceLaunchedIds}
+                notReachedIds={danceExcludedIds}
+                trackStates={Object.fromEntries(
+                  danceTracks.map((track) => [
+                    track.id,
+                    getDanceTrackState(track.id, danceNow),
+                  ] as const),
+                )}
+                nextCueId={danceCandidate?.id}
+                now={danceNow}
+              />
+            </section>
           ) : isSequenceAvailable ? (
-            <section aria-label="Secuencia de cues" className="space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <h3 className="font-semibold text-white">Secuencia de cues</h3>
-                <span className="text-xs text-slate-400">{launchedCount} / {cues?.length ?? "…"} lanzadas</span>
+            <section
+              id={showOperationTabs ? "operation-panel-operation" : undefined}
+              role={showOperationTabs ? "tabpanel" : undefined}
+              aria-labelledby={showOperationTabs ? "operation-tab-operation" : undefined}
+              aria-label="Secuencia de cues"
+              className="space-y-3"
+            >
+              <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+                <h3 className="min-w-0 break-words font-semibold text-white">Secuencia de cues</h3>
+                <span style={scaledTinyStyle} className="min-w-0 break-words text-xs text-slate-400">
+                  {launchedCount} / {cues?.length ?? "…"} lanzadas
+                </span>
               </div>
 
               <>
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <p className="text-xs text-slate-400">
+                  <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+                    <p style={scaledTinyStyle} className="min-w-0 break-words text-xs text-slate-400">
                       {launchedCount} / {cues?.length ?? 0} lanzadas
                     </p>
                     <button
@@ -1110,7 +1999,8 @@ export function OperationMode() {
                       aria-keyshortcuts={tecMode ? "ArrowLeft ArrowRight" : undefined}
                       title="Activa las flechas izquierda y derecha para retroceder o lanzar cues"
                       onClick={() => setTecMode((enabled) => !enabled)}
-                      className={`min-h-10 rounded-lg border px-4 py-2 text-sm font-bold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300 ${
+                      style={scaledSmStyle}
+                      className={`inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg border px-4 py-2 text-sm font-bold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300 ${
                         tecMode
                           ? "border-cyan-300 bg-cyan-400 text-slate-950"
                           : "border-slate-600 bg-slate-900 text-slate-200 hover:border-slate-400"
@@ -1123,6 +2013,27 @@ export function OperationMode() {
                     <p role="status" className="text-xs text-cyan-200">
                       tec activo: ← retrocede · → lanza
                     </p>
+                  )}
+
+                  {danceProduction && danceMode === "rehearsal" && (
+                    <div className="min-w-0 space-y-1">
+                      <label htmlFor="dance-rehearsal-cue-select" className="block text-xs font-semibold text-slate-300">
+                        Cue a lanzar
+                      </label>
+                      <select
+                        id="dance-rehearsal-cue-select"
+                        value={danceLaunchCue?.id ?? ""}
+                        onChange={(event) => setDanceSelectedCueId(event.target.value || null)}
+                        className="min-h-11 w-full min-w-0 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+                      >
+                        <option value="" disabled>Sin cues</option>
+                        {danceSequence.map((cue, index) => (
+                          <option key={cue.id} value={cue.id}>
+                            {`${index + 1}. ${cue.identifier} — ${cue.description || "Sin descripción"}`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   )}
 
                   <ol className="space-y-2">
@@ -1171,9 +2082,22 @@ export function OperationMode() {
                           )}
                         </div>
                         <span className="text-xs text-slate-400">
-                          Cue {launchedCount + 1} de {cues?.length ?? 0}
+                          Cue {nextCueNumber} de {cues?.length ?? 0}
                         </span>
                       </div>
+                      {danceProduction && danceLaunchCue && danceResolved && (
+                        <Countdown
+                          cue={danceLaunchCue}
+                          resolved={danceResolved}
+                          trackState={danceTrackState}
+                          trackActiveMs={danceTrackActiveMs}
+                          showActiveMs={danceShowActiveMs}
+                          isNext
+                          launched={false}
+                          onLaunch={() => void handleLaunchCue(danceLaunchCue)}
+                          launchDisabledReason={danceLaunchDisabledReason}
+                        />
+                      )}
                       <div className="flex flex-wrap items-start justify-between gap-4">
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
@@ -1193,8 +2117,11 @@ export function OperationMode() {
                         <button
                           ref={launchButtonRef}
                           type="button"
-                          disabled={isLaunchingCue || timerState === "finished" || !nextCue}
-                          onClick={() => void handleLaunchCue()}
+                          disabled={
+                            isLaunchingCue || timerState === "finished" || !nextCue
+                            || Boolean(danceProduction && danceLaunchDisabledReason)
+                          }
+                          onClick={() => void handleLaunchCue(danceProduction ? danceLaunchCue : undefined)}
                           // A held key repeats its default activation (RF7a). The
                           // click is a mouse event and cannot see `event.repeat`,
                           // so the repeated keydown default action is cancelled
@@ -1203,11 +2130,18 @@ export function OperationMode() {
                             if (event.repeat) event.preventDefault();
                           }}
                           aria-label={`${getLaunchActionLabel(nextCue.type, nextCue.includedTypes)} cue ${nextCue.identifier}`}
-                          className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300"
+                          aria-describedby={launchCueReason ? DANCE_LAUNCH_REASON_ID : undefined}
+                          style={scaledSmStyle}
+                          className="inline-flex min-h-11 min-w-11 max-w-full items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300"
                         >
                           <Play className="h-4 w-4" />
                           {getLaunchActionLabel(nextCue.type, nextCue.includedTypes)}
                         </button>
+                        {launchCueReason && (
+                          <p id={DANCE_LAUNCH_REASON_ID} className="min-w-0 break-words text-xs font-medium text-amber-300">
+                            {launchCueReason}
+                          </p>
+                        )}
                       </div>
                     </div>
                   ) : (
@@ -1225,7 +2159,7 @@ export function OperationMode() {
                         >
                           <div className="flex min-w-0 items-center gap-3">
                             <span className="shrink-0 text-xs text-slate-500">
-                              Cue {launchedCount + index + 2}
+                              Cue {nextCueNumber + index + 1}
                             </span>
                             <CueTypeBadge
                               type={cue.type}
@@ -1248,6 +2182,20 @@ export function OperationMode() {
                         </li>
                       ))}
                     </ol>
+                  )}
+
+                  {danceProduction && danceLaunchCue && (
+                    <section
+                      aria-label={`Nota de ${danceLaunchCue.identifier}`}
+                      className="min-w-0 rounded-2xl border border-slate-800 bg-slate-950/70 p-4"
+                    >
+                      <h3 className="mb-3 text-sm font-semibold text-cyan-200">Nota de cue</h3>
+                      <CueNote
+                        key={danceLaunchCue.id}
+                        cue={danceLaunchCue}
+                        onSave={(observations) => handleSaveCueNote(danceLaunchCue, observations)}
+                      />
+                    </section>
                   )}
                 </>
             </section>
@@ -1297,7 +2245,7 @@ export function OperationMode() {
                 onClick={handlePreparationAlert}
                 disabled={isPreparationAlertRunning || preparationAlertState === "done"}
                 aria-label={getPreparationAlertLabel(preparationAlertState)}
-                className={`inline-flex min-h-11 items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300 disabled:cursor-default ${
+                className={`inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300 disabled:cursor-default ${
                   isPreparationAlertWaiting
                     ? "border-red-400 bg-red-600 text-white hover:bg-red-500"
                     : isPreparationAlertRunning || preparationAlertState === "done"

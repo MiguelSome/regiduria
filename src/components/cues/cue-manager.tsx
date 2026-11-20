@@ -5,6 +5,7 @@ import { Save, Trash2, Wrench } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CueTypeBadge } from "@/components/cues/cue-type-badge";
+import { TrackPanel } from "@/components/dance/track-panel";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -24,11 +25,23 @@ import {
   deleteCue,
   getCueById,
   getCuesByProduction,
+  getDanceTracks,
   getProductions,
   saveCue,
 } from "@/lib/data-service";
-import type { Cue, CueType, Production } from "@/lib/types";
+import { buildSchedule, formatClock, parseDurationToMs, resolveCueTiming } from "@/lib/dance/schedule";
+import type { Cue, CueTiming, CueType, DanceTrack, Production } from "@/lib/types";
 import { useUiStore } from "@/store/ui-store";
+
+const DEFAULT_ALERT_MS = 10_000;
+const MAX_ABSOLUTE_MS = 24 * 60 * 60 * 1000;
+const TRACK_SELECT_ID = "cue-track-select";
+const TIME_INPUT_ID = "cue-timing-input";
+const CALCULATED_TIME_ID = "cue-calculated-time";
+const ALERT_INPUT_ID = "cue-alert-before";
+const TIMING_ERROR_ID = "cue-timing-error";
+const timingInputClass =
+  "w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-white outline-none placeholder:text-slate-500 focus-visible:ring-2 focus-visible:ring-cyan-400";
 
 const emptyCue: Cue = {
   id: "",
@@ -57,11 +70,88 @@ function getNextIdentifier(cues: Cue[], type: CueType): string {
   return getNextCueIdentifier(type, maxNumber);
 }
 
+/** Draft keeps the raw text so a half-typed time is never reformatted mid-edit. */
+interface TimingDraft {
+  trackId: string;
+  targetText: string;
+  absoluteText: string;
+  alertText: string;
+  touched: boolean;
+}
+
+function draftFromCue(cue: Cue): TimingDraft {
+  const timing = cue.timing;
+  return {
+    trackId: timing?.trackId ?? "",
+    targetText: timing?.trackOffsetMs !== undefined ? formatClock(timing.trackOffsetMs) : "",
+    absoluteText: timing?.atMs !== undefined ? formatClock(timing.atMs) : "",
+    alertText: String(timing?.alertBeforeMs ?? DEFAULT_ALERT_MS),
+    touched: false,
+  };
+}
+
+function parseAlertMs(text: string): number | null {
+  const trimmed = text.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const value = Number(trimmed);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/** Validates in Spanish and returns the exact timing to persist, or an error. */
+function validateTimingDraft(
+  draft: TimingDraft,
+  tracks: DanceTrack[],
+): { error?: string; timing?: CueTiming } {
+  const alertBeforeMs = parseAlertMs(draft.alertText);
+  if (alertBeforeMs === null || alertBeforeMs < 1_000 || alertBeforeMs > 60_000) {
+    return { error: "El aviso previo debe ser un número entero entre 1000 y 60000 ms (de 1 a 60 segundos)." };
+  }
+
+  if (draft.trackId) {
+    const track = tracks.find((item) => item.id === draft.trackId);
+    if (!track) {
+      return { error: "El track seleccionado ya no existe. Elige un track válido o quita el vínculo." };
+    }
+    const targetText = draft.targetText.trim();
+    if (!targetText) {
+      return { error: "Indica el objetivo dentro del track en mm:ss o h:mm:ss." };
+    }
+    const trackOffsetMs = parseDurationToMs(targetText);
+    if (trackOffsetMs === null) {
+      return { error: "El objetivo debe usar el formato mm:ss o h:mm:ss (por ejemplo 1:30)." };
+    }
+    const durationMs = track.durationMs;
+    if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs <= 0) {
+      return { error: `El track «${track.title}» no tiene una duración válida; añádela o elige otro track.` };
+    }
+    if (trackOffsetMs > durationMs) {
+      return { error: `El objetivo debe estar entre 00:00 y ${formatClock(durationMs)} (duración del track «${track.title}»).` };
+    }
+    return { timing: { trackId: track.id, trackOffsetMs, alertBeforeMs } };
+  }
+
+  const absoluteText = draft.absoluteText.trim();
+  if (!absoluteText) return { timing: { alertBeforeMs } };
+  const atMs = parseDurationToMs(absoluteText);
+  if (atMs === null) {
+    return { error: "El tiempo absoluto debe usar el formato mm:ss o h:mm:ss (por ejemplo 12:30)." };
+  }
+  if (atMs > MAX_ABSOLUTE_MS) {
+    return { error: "El tiempo absoluto no puede superar 24:00:00." };
+  }
+  return { timing: { atMs, alertBeforeMs } };
+}
+
 export function CueManager() {
   const [projects, setProjects] = useState<Production[]>([]);
   const [cues, setCues] = useState<Cue[]>([]);
   const [selectedType, setSelectedType] = useState<CueTypeFilter>("Todas");
   const [form, setForm] = useState<Cue>(emptyCue);
+  const [loadedDanceTracks, setLoadedDanceTracks] = useState<DanceTrack[]>([]);
+  const [trackLoadError, setTrackLoadError] = useState<string | null>(null);
+  const [timingDraft, setTimingDraft] = useState<TimingDraft>(() => draftFromCue(emptyCue));
+  const [timingError, setTimingError] = useState<string | null>(null);
+  const timingKeyRef = useRef(`${emptyCue.id}::${emptyCue.productionId}`);
   const editCueHandled = useRef(false);
   const activeProjectId = useUiStore((state) => state.selectedProjectId);
   const setActiveProjectId = useUiStore((state) => state.setSelectedProjectId);
@@ -130,6 +220,62 @@ export function CueManager() {
     return () => window.clearTimeout(timer);
   }, [selectedProductionId, form.productionId]);
 
+  const isDanceProject = useMemo(
+    () => projects.some((project) => project.id === selectedProductionId && project.mode === "dance"),
+    [projects, selectedProductionId],
+  );
+
+  const danceTracks = useMemo(
+    () => (isDanceProject ? loadedDanceTracks : []),
+    [isDanceProject, loadedDanceTracks],
+  );
+
+  const reloadDanceData = useCallback(async () => {
+    if (!selectedProductionId) return;
+    try {
+      const [tracks, nextCues] = await Promise.all([
+        getDanceTracks(selectedProductionId),
+        getCuesByProduction(selectedProductionId),
+      ]);
+      if (useUiStore.getState().selectedProjectId !== selectedProductionId) return;
+      setLoadedDanceTracks(tracks);
+      setCues(nextCues);
+      setTrackLoadError(null);
+    } catch (error) {
+      console.error(error);
+      setTrackLoadError("No se pudieron actualizar los tracks y sus cues.");
+    }
+  }, [selectedProductionId]);
+
+  useEffect(() => {
+    if (!isDanceProject || !selectedProductionId) return;
+    let isCurrent = true;
+    void getDanceTracks(selectedProductionId)
+      .then((tracks) => {
+        if (!isCurrent) return;
+        setLoadedDanceTracks(tracks);
+        setTrackLoadError(null);
+      })
+      .catch((error: unknown) => {
+        console.error(error);
+        if (isCurrent) setTrackLoadError("No se pudieron cargar los tracks.");
+      });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [isDanceProject, selectedProductionId]);
+
+  // A new cue (or a different edited cue) starts from its persisted timing.
+  // Other form edits keep the draft, so typing a time is never overwritten.
+  useEffect(() => {
+    const key = `${form.id}::${form.productionId}`;
+    if (key === timingKeyRef.current) return;
+    timingKeyRef.current = key;
+    setTimingDraft(draftFromCue(form));
+    setTimingError(null);
+  }, [form]);
+
   const productionCues = useMemo(
     () => cues.filter((cue) => cue.productionId === selectedProductionId),
     [cues, selectedProductionId],
@@ -139,11 +285,87 @@ export function CueManager() {
     [productionCues, selectedType],
   );
 
+  // Only starts and resolved times are read here; the injected `now` is just
+  // the schedule's trace stamp, so a fixed value avoids an impure render.
+  const schedule = useMemo(
+    () => buildSchedule({ tracks: danceTracks, cues: productionCues, now: 0 }),
+    [danceTracks, productionCues],
+  );
+
+  const previewTiming = useMemo<CueTiming | undefined>(() => {
+    const alertBeforeMs = parseAlertMs(timingDraft.alertText) ?? DEFAULT_ALERT_MS;
+    if (timingDraft.trackId) {
+      const trackOffsetMs = parseDurationToMs(timingDraft.targetText);
+      if (trackOffsetMs === null) return undefined;
+      return { trackId: timingDraft.trackId, trackOffsetMs, alertBeforeMs };
+    }
+    const atMs = parseDurationToMs(timingDraft.absoluteText);
+    return { ...(atMs !== null ? { atMs } : {}), alertBeforeMs };
+  }, [timingDraft]);
+
+  const resolvedTiming = useMemo(
+    () => resolveCueTiming({ ...form, timing: previewTiming }, schedule),
+    [form, previewTiming, schedule],
+  );
+  const calculatedAbsolute = resolvedTiming.status === "linked" && resolvedTiming.atMs !== undefined
+    ? formatClock(resolvedTiming.atMs)
+    : null;
+
+  const setTimingField = (field: keyof Omit<TimingDraft, "touched">, value: string) => {
+    setTimingDraft((current) => ({ ...current, [field]: value, touched: true }));
+    setTimingError(null);
+  };
+
+  const handleTrackChange = (nextTrackId: string) => {
+    if (nextTrackId === timingDraft.trackId) return;
+    if (nextTrackId) {
+      setTimingDraft((current) => ({ ...current, trackId: nextTrackId, touched: true }));
+      setTimingError(null);
+      return;
+    }
+
+    // Unlinking materializes the last computed absolute time as atMs (RF6c/RF35).
+    const trackOffsetMs = parseDurationToMs(timingDraft.targetText);
+    const previousTiming: CueTiming | undefined = timingDraft.trackId
+      ? {
+          trackId: timingDraft.trackId,
+          ...(trackOffsetMs !== null ? { trackOffsetMs } : {}),
+        }
+      : undefined;
+    const previousResolution = resolveCueTiming({ ...form, timing: previousTiming }, schedule);
+    const materialized = previousResolution.atMs !== undefined
+      ? formatClock(previousResolution.atMs)
+      : "";
+    setTimingDraft((current) => ({
+      ...current,
+      trackId: "",
+      targetText: "",
+      absoluteText: materialized || current.absoluteText,
+      touched: true,
+    }));
+    setTimingError(null);
+  };
+
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!selectedProductionId) return;
+
+    // Untouched timing is passed through verbatim: saving only notes must keep
+    // the exact track, offset, absolute time and alert (CL45, RF31, RF35).
+    let timingForSave: CueTiming | undefined = form.timing;
+    if (isDanceProject && timingDraft.touched) {
+      const validation = validateTimingDraft(timingDraft, danceTracks);
+      if (validation.error) {
+        setTimingError(validation.error);
+        return;
+      }
+      timingForSave = validation.timing;
+    }
+    setTimingError(null);
+
     const normalized: Cue = {
       ...form,
+      timing: timingForSave,
       id: form.id || crypto.randomUUID(),
       productionId: selectedProductionId,
       identifier: form.identifier.trim() || getNextIdentifier(productionCues, form.type),
@@ -186,6 +408,23 @@ export function CueManager() {
           </p>
         )}
       </div>
+
+      {isDanceProject && selectedProductionId && (
+        <Card className="mb-6 border-cyan-900/60 bg-slate-900/80">
+          {trackLoadError && (
+            <p role="alert" className="mb-3 text-sm text-amber-300">{trackLoadError}</p>
+          )}
+          <TrackPanel
+            productionId={selectedProductionId}
+            tracks={danceTracks}
+            cues={productionCues}
+            mode="rehearsal"
+            variant="management"
+            notReachedIds={[]}
+            onTracksChanged={() => void reloadDanceData()}
+          />
+        </Card>
+      )}
 
       <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
       <Card className="border-slate-800 bg-slate-900/80">
@@ -286,11 +525,15 @@ export function CueManager() {
 
         <form onSubmit={handleSubmit} className="space-y-4">
           {!selectedProductionId && (
-            <p role="status" className="text-sm text-slate-400">
+            <p id="cue-form-disabled-reason" role="status" className="text-sm text-slate-400">
               Selecciona o crea un proyecto antes de añadir cues.
             </p>
           )}
-          <fieldset disabled={!selectedProductionId} className="space-y-4 disabled:opacity-50">
+          <fieldset
+            disabled={!selectedProductionId}
+            aria-describedby={!selectedProductionId ? "cue-form-disabled-reason" : undefined}
+            className="space-y-4 disabled:opacity-50"
+          >
           <div className="grid gap-4 md:grid-cols-2">
             <label className="space-y-2 text-sm text-slate-300">
               <span>Identificador</span>
@@ -453,6 +696,109 @@ export function CueManager() {
               placeholder="Anotaciones del responsable"
             />
           </label>
+
+          {isDanceProject && (
+            <fieldset className="space-y-3 rounded-xl border border-cyan-500/20 bg-slate-950/40 p-4">
+              <legend className="px-1 text-sm font-medium text-cyan-200">Tiempo en la escaleta</legend>
+
+              <label className="block space-y-2 text-sm text-slate-300" htmlFor={TRACK_SELECT_ID}>
+                <span>Track</span>
+                <select
+                  id={TRACK_SELECT_ID}
+                  value={timingDraft.trackId}
+                  onChange={(event) => handleTrackChange(event.target.value)}
+                  className={timingInputClass}
+                >
+                  <option value="">Sin track</option>
+                  {danceTracks.map((track) => (
+                    <option key={track.id} value={track.id}>{track.title}</option>
+                  ))}
+                </select>
+              </label>
+
+              {timingDraft.trackId ? (
+                <>
+                  <label className="block space-y-2 text-sm text-slate-300" htmlFor={TIME_INPUT_ID}>
+                    <span>Objetivo dentro del track</span>
+                    <input
+                      id={TIME_INPUT_ID}
+                      value={timingDraft.targetText}
+                      onChange={(event) => setTimingField("targetText", event.target.value)}
+                      inputMode="numeric"
+                      placeholder="1:30"
+                      aria-invalid={Boolean(timingError)}
+                      aria-describedby={`${TIME_INPUT_ID}-hint${timingError ? ` ${TIMING_ERROR_ID}` : ""}`}
+                      className={timingInputClass}
+                    />
+                    <span id={`${TIME_INPUT_ID}-hint`} className="block text-xs text-slate-400">
+                      mm:ss u h:mm:ss. Entre 00:00 y la duración del track; el final exacto es válido.
+                    </span>
+                  </label>
+
+                  <div className="space-y-1">
+                    <label className="block text-sm text-slate-300" htmlFor={CALCULATED_TIME_ID}>
+                      Tiempo absoluto (calculado)
+                    </label>
+                    <output
+                      id={CALCULATED_TIME_ID}
+                      aria-describedby={`${CALCULATED_TIME_ID}-hint`}
+                      className="block w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-lg text-cyan-200"
+                    >
+                      {calculatedAbsolute ?? "—"}
+                    </output>
+                    <p id={`${CALCULATED_TIME_ID}-hint`} className="text-xs text-slate-400">
+                      Calculado con el inicio del track y el objetivo. No se edita directamente: cambia el objetivo o quita el track.
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <label className="block space-y-2 text-sm text-slate-300" htmlFor={TIME_INPUT_ID}>
+                  <span>Tiempo absoluto</span>
+                  <input
+                    id={TIME_INPUT_ID}
+                    value={timingDraft.absoluteText}
+                    onChange={(event) => setTimingField("absoluteText", event.target.value)}
+                    inputMode="numeric"
+                    placeholder="12:30"
+                    aria-invalid={Boolean(timingError)}
+                    aria-describedby={`${TIME_INPUT_ID}-hint${timingError ? ` ${TIMING_ERROR_ID}` : ""}`}
+                    className={timingInputClass}
+                  />
+                  <span id={`${TIME_INPUT_ID}-hint`} className="block text-xs text-slate-400">
+                    mm:ss u h:mm:ss desde el inicio del espectáculo. Máximo 24:00:00; déjalo vacío para dejar el cue sin tiempo.
+                  </span>
+                </label>
+              )}
+
+              <label className="block space-y-2 text-sm text-slate-300" htmlFor={ALERT_INPUT_ID}>
+                <span>Avisar antes (ms)</span>
+                <input
+                  id={ALERT_INPUT_ID}
+                  value={timingDraft.alertText}
+                  onChange={(event) => setTimingField("alertText", event.target.value)}
+                  inputMode="numeric"
+                  aria-invalid={Boolean(timingError)}
+                  aria-describedby={`${ALERT_INPUT_ID}-hint${timingError ? ` ${TIMING_ERROR_ID}` : ""}`}
+                  className={timingInputClass}
+                />
+                <span id={`${ALERT_INPUT_ID}-hint`} className="block text-xs text-slate-400">
+                  Entre 1000 y 60000 ms (de 1 a 60 segundos).
+                </span>
+              </label>
+
+              {danceTracks.length === 0 && (
+                <p role="status" className="text-xs text-slate-400">
+                  Este proyecto aún no tiene tracks: usa el tiempo absoluto o crea los tracks en esta página.
+                </p>
+              )}
+
+              {timingError && (
+                <p id={TIMING_ERROR_ID} role="alert" className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
+                  {timingError}
+                </p>
+              )}
+            </fieldset>
+          )}
 
           {form.scriptDocumentId && (
             <p className="text-xs leading-5 text-cyan-200">

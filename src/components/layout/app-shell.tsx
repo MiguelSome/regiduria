@@ -4,14 +4,21 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { liveQuery } from "dexie";
 import { Moon, SunMedium, Theater, Wrench } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { getProductions } from "@/lib/data-service";
-import { navigation } from "@/lib/navigation";
+import { DEFAULT_DANCE_PREFERENCES } from "@/lib/dance/preferences";
+import { getDancePreferences, getProductions } from "@/lib/data-service";
+import { navigationGroups } from "@/lib/navigation";
 import { cn } from "@/lib/utils";
 import type { Production } from "@/lib/types";
 import { useUiStore } from "@/store/ui-store";
+
+const FONT_SCALE_FACTORS = {
+  normal: "1",
+  grande: "1.25",
+  "muy-grande": "1.5",
+} as const;
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -21,14 +28,47 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     selectedProjectId,
     setSelectedProjectId,
     isProductionSelectionLocked,
+    dancePreferences,
+    setDancePreferences,
   } = useUiStore();
   const [productions, setProductions] = useState<Production[]>([]);
   const [isProductionsLoading, setIsProductionsLoading] = useState(true);
   const [productionLoadError, setProductionLoadError] = useState<string | null>(null);
+  const preferencesRequestRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", isDark);
   }, [isDark]);
+
+  // Dexie is the source of truth; hydrate the store cache only when empty (T10 A1).
+  useEffect(() => {
+    if (useUiStore.getState().dancePreferences !== null || preferencesRequestRef.current) return;
+    preferencesRequestRef.current = getDancePreferences()
+      .then((stored) => {
+        // Do not overwrite a preference saved from /ajustes while this read was in flight.
+        if (stored && useUiStore.getState().dancePreferences === null) {
+          setDancePreferences(stored);
+        }
+      })
+      .catch((error: unknown) => {
+        console.error(error);
+      })
+      .finally(() => {
+        preferencesRequestRef.current = null;
+      });
+  }, [setDancePreferences]);
+
+  // Keep the screen-level CSS hooks in sync with the cache, including live edits.
+  useEffect(() => {
+    const preferences = dancePreferences ?? DEFAULT_DANCE_PREFERENCES;
+    const root = document.documentElement;
+    root.style.setProperty("--dance-font-scale", FONT_SCALE_FACTORS[preferences.fontScale]);
+    root.setAttribute("data-dance-contrast", preferences.highContrast ? "high" : "normal");
+    return () => {
+      root.style.removeProperty("--dance-font-scale");
+      root.removeAttribute("data-dance-contrast");
+    };
+  }, [dancePreferences]);
 
   useEffect(() => {
     const savedProjectId = window.localStorage.getItem("regiduria:active-project") ?? "";
@@ -58,6 +98,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
     return () => subscription.unsubscribe();
   }, []);
+
+  // Reuse the productions already loaded by the shell; do not duplicate selection logic.
+  const selectedProduction = productions.find((production) => production.id === selectedProjectId);
+  const isDanceProject = selectedProduction?.mode === "dance";
+  const visibleNavigationGroups = navigationGroups
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => !item.danceOnly || isDanceProject),
+    }))
+    .filter((group) => group.items.length > 0);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -124,21 +174,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <div className="border-t border-slate-800">
           <div className="mx-auto hidden max-w-7xl items-center justify-between gap-4 px-4 py-3 sm:px-6 md:flex lg:px-8">
-            <nav aria-label="Navegación principal" className="flex flex-wrap items-center gap-3">
-              {navigation.map((item) => (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  aria-current={pathname === item.href ? "page" : undefined}
-                  className={cn(
-                    "shrink-0 rounded-full border px-3 py-2 text-sm transition hover:border-slate-600 hover:bg-slate-800 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300",
-                    pathname === item.href
-                      ? "border-cyan-400/40 bg-cyan-500/10 text-cyan-100"
-                      : "border-slate-800 bg-slate-900 text-slate-300",
-                  )}
-                >
-                  {item.label}
-                </Link>
+            <nav aria-label="Navegación principal" className="flex flex-wrap items-center gap-x-5 gap-y-3">
+              {visibleNavigationGroups.map((group) => (
+                <div key={group.label} className="flex items-center gap-3">
+                  <span className="text-[10px] font-semibold text-slate-500">{group.label}</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {group.items.map((item) => (
+                      <Link
+                        key={item.href}
+                        href={item.href}
+                        aria-current={pathname === item.href ? "page" : undefined}
+                        className={cn(
+                          "shrink-0 rounded-full border px-3 py-2 text-sm transition hover:border-slate-600 hover:bg-slate-800 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300",
+                          pathname === item.href
+                            ? "border-cyan-400/40 bg-cyan-500/10 text-cyan-100"
+                            : "border-slate-800 bg-slate-900 text-slate-300",
+                        )}
+                      >
+                        {item.label}
+                      </Link>
+                    ))}
+                  </div>
+                </div>
               ))}
             </nav>
             <div className="hidden shrink-0 items-center gap-2 rounded-full border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs text-slate-300 lg:flex">
@@ -148,22 +205,29 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
           <nav
             aria-label="Navegación principal"
-            className="mx-auto flex max-w-7xl gap-3 overflow-x-auto px-4 py-3 sm:px-6 md:hidden"
+            className="mx-auto flex max-w-7xl gap-5 overflow-x-auto px-4 py-3 sm:px-6 md:hidden"
           >
-            {navigation.map((item) => (
-              <Link
-                key={item.href}
-                href={item.href}
-                aria-current={pathname === item.href ? "page" : undefined}
-                className={cn(
-                  "shrink-0 rounded-full border px-3 py-2 text-xs hover:border-slate-500 hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300",
-                  pathname === item.href
-                    ? "border-cyan-400/40 bg-cyan-500/10 text-cyan-100"
-                    : "border-slate-700 bg-slate-900 text-slate-300",
-                )}
-              >
-                {item.label}
-              </Link>
+            {visibleNavigationGroups.map((group) => (
+              <div key={group.label} className="shrink-0">
+                <p className="mb-1 text-[10px] font-semibold text-slate-500">{group.label}</p>
+                <div className="flex gap-2">
+                  {group.items.map((item) => (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      aria-current={pathname === item.href ? "page" : undefined}
+                      className={cn(
+                        "shrink-0 rounded-full border px-3 py-2 text-xs hover:border-slate-500 hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300",
+                        pathname === item.href
+                          ? "border-cyan-400/40 bg-cyan-500/10 text-cyan-100"
+                          : "border-slate-700 bg-slate-900 text-slate-300",
+                      )}
+                    >
+                      {item.label}
+                    </Link>
+                  ))}
+                </div>
+              </div>
             ))}
           </nav>
         </div>

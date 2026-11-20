@@ -2,9 +2,12 @@ import Dexie, { type Table } from "dexie";
 
 import type {
   Cue,
+  DancePreferences,
+  DanceTrack,
   Incident,
   Performance,
   Production,
+  ScheduleTemplate,
   ScriptDocument,
   ScriptLabel,
 } from "@/lib/types";
@@ -16,6 +19,9 @@ class RegiduriaDb extends Dexie {
   performances!: Table<Performance, string>;
   scriptDocuments!: Table<ScriptDocument, string>;
   scriptLabels!: Table<ScriptLabel, string>;
+  danceTracks!: Table<DanceTrack, string>;
+  scheduleTemplates!: Table<ScheduleTemplate, string>;
+  appSettings!: Table<DancePreferences, string>;
 
   constructor() {
     super("regiduria-db");
@@ -79,6 +85,17 @@ class RegiduriaDb extends Dexie {
           }
         });
       });
+    this.version(5).stores({
+      productions: "id, title, status, syncStatus",
+      cues: "id, productionId, identifier, status, executionState, scriptDocumentId",
+      incidents: "id, productionId, date, status",
+      performances: "id, productionId, date, title",
+      scriptDocuments: "id, productionId",
+      scriptLabels: "id, documentId, category, page, cueId, productionId",
+      danceTracks: "id, productionId, order",
+      scheduleTemplates: "id, name, updatedAt",
+      appSettings: "id",
+    });
   }
 }
 

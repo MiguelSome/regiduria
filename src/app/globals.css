@@ -33,3 +33,171 @@ a {
   background-color: rgba(34, 211, 238, 0.4);
   color: white;
 }
+
+/* Launch confirmation: 400 ms on / 400 ms off, with a static equivalent. */
+@keyframes dance-launch-flash {
+  0%,
+  49.99% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0.35;
+  }
+}
+
+.dance-launch-flash {
+  animation: dance-launch-flash 800ms steps(1, end) infinite;
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dance-launch-flash {
+    animation: none;
+    outline: 4px solid #facc15;
+  }
+}
+
+/* T10 A1: high contrast keeps the closed band palette and AA text on dark fills. */
+[data-dance-contrast="high"] .dance-band-frame {
+  border-width: 2px;
+  color: #fff;
+}
+
+[data-dance-contrast="high"] .dance-band-frame[data-band="red"] {
+  border-color: #dc2626;
+}
+
+[data-dance-contrast="high"] .dance-band-frame[data-band="orange"] {
+  border-color: #ea580c;
+}
+
+[data-dance-contrast="high"] .dance-band-frame[data-band="green"] {
+  border-color: #16a34a;
+}
+
+[data-dance-contrast="high"] .dance-band-frame[data-band="blue"] {
+  border-color: #2563eb;
+}
+
+[data-dance-contrast="high"] .dance-band-frame[data-band="yellow"] {
+  border-color: #eab308;
+}
+
+[data-dance-contrast="high"] .dance-band-frame[data-band="neutral"] {
+  border-color: #e2e8f0;
+}
+
+[data-dance-contrast="high"] .dance-launch-flash:not(:disabled) {
+  border-color: #fff;
+  background-color: #000;
+  color: #fff;
+  box-shadow: 0 0 0 2px #dc2626;
+}
+
+[data-dance-contrast="high"] .dance-launch-flash:disabled {
+  border-color: #cbd5e1;
+  background-color: #1e293b;
+  color: #fff;
+}
+
+/* Print rules only: the screen styles above are left untouched. */
+@media print {
+  @page {
+    margin: 14mm;
+  }
+
+  html,
+  body {
+    background: #fff !important;
+    color: #000 !important;
+  }
+
+  header,
+  nav,
+  .no-print {
+    display: none !important;
+  }
+
+  /* Only the print sheet and the elements that contain it reach the paper. */
+  body *:not(#print-sheet):not(#print-sheet *):not(:has(#print-sheet)) {
+    display: none !important;
+  }
+
+  :has(#print-sheet) {
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+    color: #000 !important;
+  }
+
+  #print-sheet {
+    width: 100% !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    font-size: 9pt;
+  }
+
+  #print-sheet,
+  #print-sheet *,
+  #print-sheet *::before,
+  #print-sheet *::after {
+    overflow: visible !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    color: #000 !important;
+    text-shadow: none !important;
+  }
+
+  #print-sheet table {
+    width: 100% !important;
+    min-width: 0 !important;
+    border-collapse: collapse !important;
+    table-layout: fixed !important;
+  }
+
+  #print-sheet thead {
+    display: table-header-group !important;
+  }
+
+  #print-sheet tfoot {
+    display: table-footer-group !important;
+  }
+
+  #print-sheet tr,
+  #print-sheet th,
+  #print-sheet td {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  #print-sheet th,
+  #print-sheet td {
+    border: 1px solid #9ca3af !important;
+    padding: 2pt 3pt !important;
+    vertical-align: top !important;
+    overflow-wrap: anywhere !important;
+  }
+
+  #print-sheet h1 {
+    font-size: 16pt !important;
+  }
+
+  #print-sheet h2 {
+    font-size: 12pt !important;
+  }
+
+  #print-sheet section {
+    margin-bottom: 8pt !important;
+  }
+}
+
+/* T10 A1: printed sheets keep fixed type even when the screen font scale is raised. */
+@media print {
+  :root {
+    --dance-font-scale: 1 !important;
+  }
+}

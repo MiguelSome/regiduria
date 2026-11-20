@@ -35,6 +35,21 @@ La primera iteración incluye una base operativa con los siguientes módulos:
 - modo función para ensayos y representaciones, con preparación previa, avisos temporizados 30/15/5, checklist por sonido y departamentos, un visor de libreto y lanzamiento de cues antes o después de iniciar el cronómetro sin perder el progreso
 - incidencias y reportes
 - sistema de persistencia local con Dexie; los proyectos, PDFs y equipos permanecen en el navegador donde se crean
+- **modo danza**: proyectos sin PDF obligatorio, documento/escaleta derivada, tracks con cronómetro en tiempo activo, reloj de espectáculo, cuentas atrás con bandas, lanzamiento integrado en `/modo-funcion`, ensayo/función, informe de desviaciones, plantillas y ajustes de accesibilidad; el flujo estándar con PDF sigue intacto
+
+## Modo Danza
+
+El modo se elige al crear el proyecto y no se puede cambiar después. En danza el documento principal es la escaleta estructurada; el PDF, si se aporta, es un libreto complementario. El cronómetro de cada track y el reloj de espectáculo miden tiempo activo (sin pausas), y el informe guarda la desviación de cada cue respecto a su objetivo.
+
+Rutas específicas:
+
+- `/documento` y `/documento/imprimir`: documento y escaleta imprimible.
+- `/plantillas`: biblioteca global de plantillas, con importación/exportación JSON y exportación de la escaleta del proyecto.
+- `/ajustes`: bandas de cuenta atrás, tamaño de fuente, alto contraste, sonido y umbral por defecto.
+- `/reportes` y `/reportes/imprimir`: funciones de danza e informe de desviaciones.
+- `/modo-funcion`: ejecución de danza con pestaña interna "Documento"; no existe una ruta `/modo-danza` separada.
+
+Ensayo permite lanzar fuera de orden sin crear registro. Función exige la siguiente cue de la escaleta, registra cada lanzamiento y ofrece dos vías de cierre: lanzar la última cue o "Finalizar función" (solo con un registro abierto). "Descartar función" elimina el registro y no contabiliza la función. Los registros abiertos de sesiones anteriores se muestran como limitación heredada de la spec 001.
 
 ## Verificación
 
@@ -42,6 +57,8 @@ La primera iteración incluye una base operativa con los siguientes módulos:
 npm run lint
 npm run build
 ```
+
+Además de `lint` y `build`, la verificación funcional del modo danza es el **guion manual de 26 pasos** de `specs/002-modo-danza/spec.md` §11, que incluye los recorridos de compatibilidad con la spec 001 y el proyecto estándar, la impresión en claro y la operación solo con teclado a 360 px.
 
 El objetivo de esta versión es dejar una base sólida, profesional y extensible para continuar la implementación por fases con mayor detalle funcional.
 

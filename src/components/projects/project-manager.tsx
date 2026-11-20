@@ -16,15 +16,22 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { createEmptyProjectTeam, ProjectTeamDialog } from "@/components/projects/project-team-dialog";
 import {
+  createProductionWithoutPdf,
   createProductionWithPdf,
   deleteAllProductions,
   deleteProduction,
+  deleteScriptDocument,
   getProductions,
+  getScheduleTemplate,
+  getScheduleTemplates,
   getScriptDocument,
+  saveCue,
+  saveDanceTrack,
   saveProduction,
   saveScriptDocument,
 } from "@/lib/data-service";
-import type { DepartmentName, Production, ScriptDocument } from "@/lib/types";
+import { applyTemplateToProject } from "@/lib/dance/templates";
+import type { DepartmentName, Production, ScheduleTemplate, ScriptDocument } from "@/lib/types";
 import { useUiStore } from "@/store/ui-store";
 
 const technicalDepartments: DepartmentName[] = [
@@ -88,6 +95,9 @@ export function ProjectManager() {
   const [isTeamOpen, setIsTeamOpen] = useState(false);
   const [pdfDocument, setPdfDocument] = useState<ScriptDocument | null>(null);
   const [newPdfFile, setNewPdfFile] = useState<File | null>(null);
+  const [newProjectMode, setNewProjectMode] = useState<"standard" | "dance">("standard");
+  const [initialTemplateId, setInitialTemplateId] = useState("");
+  const [scheduleTemplates, setScheduleTemplates] = useState<ScheduleTemplate[]>([]);
   const [isSavingPdf, setIsSavingPdf] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
@@ -167,12 +177,29 @@ export function ProjectManager() {
     };
   }, [form.id, isCreating]);
 
+  useEffect(() => {
+    if (!isCreating) return;
+    let active = true;
+    void getScheduleTemplates()
+      .then((templates) => {
+        if (active) setScheduleTemplates(templates);
+      })
+      .catch((loadError: unknown) => {
+        console.error(loadError);
+      });
+    return () => {
+      active = false;
+    };
+  }, [isCreating]);
+
   const beginNewProject = () => {
     saveRevision.current += 1;
     setError(null);
     setSaveState("idle");
     setPdfDocument(null);
     setNewPdfFile(null);
+    setNewProjectMode("standard");
+    setInitialTemplateId("");
     setForm(createBlankProduction());
     setIsCreating(true);
   };
@@ -205,17 +232,21 @@ export function ProjectManager() {
   const handleCreateProject = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError(null);
-    if (!newPdfFile) {
+    const isDance = newProjectMode === "dance";
+    // Solo en el alta de un proyecto de danza se aplica la plantilla elegida (RF27).
+    const templateIdToApply = isDance ? initialTemplateId.trim() : "";
+    if (!isDance && !newPdfFile) {
       setError("Selecciona el PDF de la obra para crear el proyecto.");
       return;
     }
-    if (!isPdf(newPdfFile)) {
+    if (newPdfFile && !isPdf(newPdfFile)) {
       setError("El archivo seleccionado no es un PDF válido.");
       return;
     }
 
     const project: Production = {
       ...form,
+      mode: newProjectMode,
       id: crypto.randomUUID(),
       title: form.title.trim(),
       subtitle: form.subtitle.trim(),
@@ -232,19 +263,79 @@ export function ProjectManager() {
       team: form.team ?? createEmptyProjectTeam(),
     };
 
+    let createdProject = project;
+    let projectCreated = false;
+    let isApplyingTemplate = false;
+
     try {
-      await createProductionWithPdf(project, newPdfFile.name, newPdfFile);
+      if (newPdfFile) {
+        await createProductionWithPdf(project, newPdfFile.name, newPdfFile);
+      } else {
+        // Danza allows creating a project with only its name (RF2).
+        await createProductionWithoutPdf(project);
+      }
+      projectCreated = true;
+
+      if (templateIdToApply) {
+        isApplyingTemplate = true;
+        const template = await getScheduleTemplate(templateIdToApply);
+        if (!template) {
+          throw new Error(`No se encontró la plantilla «${templateIdToApply}».`);
+        }
+        // applyTemplateToProject crea ids nuevos para tracks y cues y devuelve un
+        // templateOrigin fijo: la copia no comparte ningún id con la plantilla (D10/D36).
+        const { tracks, cues, templateOrigin } = applyTemplateToProject({
+          template,
+          productionId: project.id,
+          now: Date.now(),
+        });
+        for (const track of tracks) {
+          await saveDanceTrack(track);
+        }
+        for (const cue of cues) {
+          await saveCue(cue);
+        }
+        // `project` ya contiene `mode`; al extenderlo se conserva junto a la trazabilidad.
+        createdProject = { ...project, templateOrigin };
+        await saveProduction(createdProject);
+        isApplyingTemplate = false;
+      }
+
+      // Se completan todas las lecturas asíncronas antes de tocar el estado de la interfaz:
+      // así un fallo puede deshacer la creación sin dejar el proyecto recién creado seleccionado.
       const nextProjects = await getProductions();
+      const scriptDocument = newPdfFile ? await getScriptDocument(project.id) ?? null : null;
       setProjects(nextProjects);
-      setForm(cloneProduction(project));
+      setForm(cloneProduction(createdProject));
       setSelectedProjectId(project.id);
       setIsCreating(false);
       setNewPdfFile(null);
-      setPdfDocument(await getScriptDocument(project.id) ?? null);
+      setPdfDocument(scriptDocument);
       setSaveState("saved");
     } catch (saveError) {
       console.error(saveError);
-      setError("No se pudo crear el proyecto y guardar su PDF.");
+      if (projectCreated) {
+        try {
+          if (newPdfFile) {
+            const document = await getScriptDocument(project.id);
+            if (document) await deleteScriptDocument(project.id);
+          }
+          await deleteProduction(project.id);
+        } catch (rollbackError) {
+          console.error(rollbackError);
+        }
+      }
+      // Se permanece en el alta con los campos escritos, sin seleccionar el proyecto
+      // deshecho, para que el usuario pueda volver a intentarlo.
+      setIsCreating(true);
+      setSaveState("idle");
+      const templateError = "No se pudo aplicar la plantilla. Se ha deshecho la creación del proyecto; inténtalo de nuevo.";
+      const creationError = newPdfFile
+        ? "No se pudo crear el proyecto y guardar su PDF."
+        : "No se pudo crear el proyecto de danza.";
+      setError(isApplyingTemplate ? templateError : creationError);
+    } finally {
+      setInitialTemplateId("");
     }
   };
 
@@ -359,7 +450,7 @@ export function ProjectManager() {
               <FolderOpen className="h-9 w-9 text-slate-500" />
               <h3 className="mt-4 text-lg font-semibold text-white">Aún no hay proyectos</h3>
               <p className="mt-2 max-w-xs text-sm leading-6 text-slate-400">
-                Crea una obra y añade su PDF para empezar a preparar el libreto y el equipo.
+                Crea un proyecto estándar con PDF o uno de Danza con documento y escaleta.
               </p>
               <Button
                 type="button"
@@ -444,6 +535,18 @@ export function ProjectManager() {
                 <h2 className="mt-1 text-xl font-semibold text-white">
                   {isCreating ? "Nuevo proyecto" : form.title || "Proyecto sin título"}
                 </h2>
+                {!isCreating && (
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                    <span className="rounded-full border border-slate-700 bg-slate-950 px-2 py-0.5 text-slate-300">
+                      {form.mode === "dance" ? "Danza" : "Estándar"}
+                    </span>
+                    {form.templateOrigin && (
+                      <span className="text-slate-400">
+                        Plantilla: {form.templateOrigin.name} (v{form.templateOrigin.version})
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-3">
                 {!isCreating && (
@@ -472,6 +575,46 @@ export function ProjectManager() {
             </div>
 
             <form onSubmit={handleCreateProject} className="space-y-4">
+              {isCreating && (
+                <fieldset className="rounded-xl border border-slate-800 bg-slate-950 p-4">
+                  <legend className="px-1 text-sm font-medium text-slate-200">Modo del proyecto</legend>
+                  <div className="mt-2 grid gap-3 md:grid-cols-2">
+                    <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-800 bg-slate-900 p-3 focus-within:border-cyan-400">
+                      <input
+                        type="radio"
+                        name="project-mode"
+                        value="standard"
+                        checked={newProjectMode === "standard"}
+                        onChange={() => setNewProjectMode("standard")}
+                        className="mt-1 h-4 w-4 shrink-0 accent-cyan-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+                      />
+                      <span className="space-y-1">
+                        <span className="block text-sm font-medium text-white">Estándar (PDF)</span>
+                        <span className="block text-xs leading-5 text-slate-400">
+                          el espectáculo se prepara a partir de su libreto PDF.
+                        </span>
+                      </span>
+                    </label>
+                    <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-800 bg-slate-900 p-3 focus-within:border-cyan-400">
+                      <input
+                        type="radio"
+                        name="project-mode"
+                        value="dance"
+                        checked={newProjectMode === "dance"}
+                        onChange={() => setNewProjectMode("dance")}
+                        className="mt-1 h-4 w-4 shrink-0 accent-cyan-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+                      />
+                      <span className="space-y-1">
+                        <span className="block text-sm font-medium text-white">Danza (documento + escaleta)</span>
+                        <span className="block text-xs leading-5 text-slate-400">
+                          el espectáculo se documenta dentro de la aplicación y genera su propia escaleta.
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+                </fieldset>
+              )}
+
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="space-y-1.5 text-sm text-slate-300">
                   <span>Nombre de la obra <span className="text-rose-300">*</span></span>
@@ -539,7 +682,9 @@ export function ProjectManager() {
                       <h3 className="font-medium text-white">PDF de la obra</h3>
                       <p className="truncate text-xs text-slate-400">
                         {isCreating
-                          ? isSelectedPdfFile?.name ?? "Es necesario para crear el proyecto."
+                          ? isSelectedPdfFile?.name ?? (newProjectMode === "dance"
+                              ? "Opcional en danza; puedes añadirlo más tarde."
+                              : "Sin PDF seleccionado.")
                           : pdfDocument?.fileName ?? "Aún no hay un PDF vinculado."}
                       </p>
                     </div>
@@ -590,14 +735,37 @@ export function ProjectManager() {
                     }}
                   />
                 </div>
+                {isCreating && newProjectMode === "standard" && !newPdfFile && (
+                  <p className="mt-3 text-xs text-slate-400">
+                    Selecciona el PDF de la obra para crear el proyecto.
+                  </p>
+                )}
               </section>
+
+              {isCreating && newProjectMode === "dance" && (
+                <label className="block space-y-1.5 text-sm text-slate-300">
+                  <span>Plantilla inicial</span>
+                  <select
+                    value={initialTemplateId}
+                    onChange={(event) => setInitialTemplateId(event.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none focus:border-cyan-400"
+                  >
+                    <option value="">Empezar de cero</option>
+                    {scheduleTemplates.map((template) => (
+                      <option key={template.id} value={template.id}>
+                        {template.name} (v{template.version})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
 
               <div className="flex flex-wrap items-center gap-3 border-t border-slate-800 pt-4">
                 {isCreating ? (
                   <>
                     <Button
                       type="submit"
-                      disabled={!newPdfFile}
+                      disabled={newProjectMode === "standard" && !newPdfFile}
                       className="border-cyan-400/40 bg-cyan-400 text-slate-950 hover:border-cyan-300 hover:bg-cyan-300"
                     >
                       <Save className="mr-2 h-4 w-4" />
