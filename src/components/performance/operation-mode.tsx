@@ -19,7 +19,6 @@ import { Countdown } from "@/components/dance/countdown";
 import { CueNote } from "@/components/dance/cue-note";
 import { LiveSchedule } from "@/components/dance/live-schedule";
 import { ModeBadge } from "@/components/dance/mode-badge";
-import { ShowClock } from "@/components/dance/show-clock";
 import { TrackPanel } from "@/components/dance/track-panel";
 import {
   deletePerformance,
@@ -32,7 +31,11 @@ import {
   saveCue,
   savePerformance,
 } from "@/lib/data-service";
-import { getLaunchAvailability, LAUNCH_REASON_NOT_NEXT } from "@/lib/dance/clock";
+import {
+  getLaunchAvailability,
+  LAUNCH_REASON_ADD_DURATION,
+  LAUNCH_REASON_NOT_NEXT,
+} from "@/lib/dance/clock";
 import {
   appendLaunch,
   closeTrackRun,
@@ -42,7 +45,7 @@ import {
 } from "@/lib/dance/performance";
 import { buildCueLaunchEvent } from "@/lib/dance/report";
 import { buildSchedule, resolveCueTiming } from "@/lib/dance/schedule";
-import { getNextCandidate } from "@/lib/dance/sequence";
+import { getNextCandidate, propagateManualStop } from "@/lib/dance/sequence";
 import {
   applyCueLaunch,
   buildPerformanceRecord,
@@ -77,7 +80,14 @@ const launchActionByType: Partial<Record<CueType, string>> = {
 type TimerState = "idle" | "running" | "paused" | "finished";
 type OperationTab = "operation" | "announcements" | "document";
 
+/** Confirmed plan to start a track from a cue, with the tracks it must close first. */
+type CueTrackStartPlan = {
+  track: DanceTrack;
+  previous: { track: DanceTrack; activeMs: number }[];
+};
+
 const DANCE_LAUNCH_REASON_ID = "dance-launch-disabled-reason";
+const DANCE_RECORD_LOG_ID = "dance-record-log";
 const DANCE_FINISH_REASON_ID = "dance-finish-disabled-reason";
 const DANCE_START_REASON_ID = "dance-start-disabled-reason";
 const DANCE_BREAK_REASON_ID = "dance-break-disabled-reason";
@@ -252,6 +262,7 @@ export function OperationMode() {
   const [isSavingQuickIncident, setIsSavingQuickIncident] = useState(false);
   const [tecMode, setTecMode] = useState(false);
   const [activeTab, setActiveTab] = useState<OperationTab>("operation");
+  const [isRecordLogOpen, setIsRecordLogOpen] = useState(false);
   const [preparationAlertState, setPreparationAlertState] = useState<PreparationAlertState>("idle");
   const [preparationAlertSeconds, setPreparationAlertSeconds] = useState(30 * 60);
   const [preparationChecks, setPreparationChecks] = useState<PreparationChecks>({
@@ -612,6 +623,7 @@ export function OperationMode() {
     isLaunchingRef.current = false;
     setIsLaunchingCue(false);
     setActiveTab("operation");
+    setIsRecordLogOpen(false);
     setRunSaveError(null);
     useDanceRuntimeStore.getState().resetAll(now);
     setDanceNow(now);
@@ -687,6 +699,9 @@ export function OperationMode() {
       setElapsedMs(total);
       runStartedAt.current = null;
       setTimerState("paused");
+      // The function stopwatch is the single visible clock; it also drives the
+      // in-memory reference used by absolute cues and deviations (RF39/D32).
+      if (danceProduction) useDanceRuntimeStore.getState().pauseShow(now);
       const currentPerformance = performanceRecordRef.current;
       if (currentPerformance?.runReport) {
         void persistPerformance({
@@ -699,8 +714,10 @@ export function OperationMode() {
 
     if (timerState === "paused") {
       if (breakStartedAtRef.current !== null) return;
-      runStartedAt.current = currentInstant();
+      const now = currentInstant();
+      runStartedAt.current = now;
       setTimerState("running");
+      if (danceProduction) useDanceRuntimeStore.getState().startShow(now);
       setActiveTab("operation");
       return;
     }
@@ -747,6 +764,7 @@ export function OperationMode() {
     elapsedBeforeRun.current = 0;
     setElapsedMs(0);
     setTimerState("running");
+    if (danceProduction) useDanceRuntimeStore.getState().startShow(now);
     setActiveTab("operation");
   };
 
@@ -775,6 +793,7 @@ export function OperationMode() {
       setBreakElapsedMs(0);
       runStartedAt.current = now;
       setTimerState("running");
+      if (danceProduction) useDanceRuntimeStore.getState().startShow(now);
       setActiveTab("operation");
       announceMilestone("Descanso finalizado");
       return;
@@ -796,6 +815,7 @@ export function OperationMode() {
       runStartedAt.current = null;
       setElapsedMs(elapsed);
       setTimerState("paused");
+      if (danceProduction) useDanceRuntimeStore.getState().pauseShow(now);
     }
     breakStartedAtRef.current = now;
     setBreakStartedAt(now);
@@ -840,6 +860,96 @@ export function OperationMode() {
     }
   };
 
+  /**
+   * A cue can start a track so the operator does not have to look for it
+   * mid-show. Validation and confirmation happen before the launch is saved;
+   * the transitions are applied only after a successful save.
+   */
+  const prepareTrackStart = (
+    startsTrackId: string,
+    now: number,
+    mode: "rehearsal" | "show",
+  ): CueTrackStartPlan | null => {
+    const runtime = useDanceRuntimeStore.getState();
+    const track = danceTracks.find((item) => item.id === startsTrackId);
+    if (!track) {
+      setRunSaveError("El track vinculado a este cue ya no existe.");
+      return null;
+    }
+    if (track.durationMs === undefined || !Number.isFinite(track.durationMs) || track.durationMs <= 0) {
+      setRunSaveError(LAUNCH_REASON_ADD_DURATION);
+      return null;
+    }
+
+    const previous = Object.entries(runtime.trackRuntimes)
+      .filter(([id, item]) => id !== track.id
+        && (item.status === "En marcha" || item.status === "Pausado"))
+      .flatMap(([id, item]) => {
+        const previousTrack = danceTracks.find((candidate) => candidate.id === id);
+        return previousTrack
+          ? [{ track: previousTrack, activeMs: item.sample ? runtime.getTrackActiveMs(id, now) : 0 }]
+          : [];
+      });
+
+    if (previous.length > 0) {
+      const consequence = mode === "show"
+        ? "sus cues pendientes pasarán a «no alcanzado»"
+        : "sus cues pendientes quedarán pendientes";
+      const detail = previous.map(({ track: item }) => item.title).join(", ");
+      if (!window.confirm(
+        `Hay otro track en marcha o pausado (${detail}). Al continuar se detendrá y ${consequence}. ¿Continuar?`,
+      )) {
+        return null;
+      }
+    }
+    return { track, previous };
+  };
+
+  const commitTrackStart = (
+    plan: CueTrackStartPlan,
+    now: number,
+    mode: "rehearsal" | "show",
+  ): void => {
+    for (const { track, activeMs } of plan.previous) {
+      const runtime = useDanceRuntimeStore.getState();
+      const startedAtMs = runtime.trackRuntimes[track.id]?.startedAtMs ?? now - activeMs;
+      runtime.finishTrack(track.id, "manual", now);
+      handleTrackClosed({
+        trackId: track.id,
+        title: track.title,
+        activeMs,
+        startedAtMs,
+        endedBy: "manual",
+        now,
+      });
+    }
+
+    if (mode === "show" && plan.previous.length > 0) {
+      const runtime = useDanceRuntimeStore.getState();
+      const previousNotReached = [...new Set([...runtime.notReachedIds, ...danceNotReachedIds])];
+      const launchedIds = (cues ?? [])
+        .filter((cue) => cue.status === "Ejecutado")
+        .map((cue) => cue.id);
+      let combined = previousNotReached;
+      for (const { track } of plan.previous) {
+        const result = propagateManualStop({
+          trackId: track.id,
+          cues: cues ?? [],
+          schedule: danceSchedule,
+          mode,
+          now,
+          launchedIds,
+          notReachedIds: combined,
+        });
+        combined = [...new Set([...combined, ...result.notReachedIds])];
+      }
+      handleNotReached(combined);
+    }
+
+    useDanceRuntimeStore.getState().startTrack(plan.track.id, now);
+    announceMilestone(`Track ${plan.track.title} iniciado`);
+  };
+
   const handleLaunchCue = async (cueOverride?: Cue) => {
     // Synchronous guard: while a launch is being saved, further activations are
     // ignored instead of queued (RF7). The button `disabled` state alone is not
@@ -874,6 +984,15 @@ export function OperationMode() {
         return;
       }
 
+      // A sound cue may carry the track start; the plan is confirmed here but
+      // only applied once the launch has been saved (or applied in a rehearsal).
+      let trackStartPlan: CueTrackStartPlan | undefined;
+      if (cue.timing?.startsTrackId) {
+        const plan = prepareTrackStart(cue.timing.startsTrackId, now, mode);
+        if (!plan) return;
+        trackStartPlan = plan;
+      }
+
       const nextLaunchedIds = mode === "rehearsal"
         ? [...new Set([...danceLaunchedIdsRef.current, cue.id])]
         : [...danceLaunchedIdsRef.current, cue.id];
@@ -904,6 +1023,7 @@ export function OperationMode() {
         launchedCountRef.current = nextCount;
         setLaunchedCount(nextCount);
         announceMilestone(`Cue ${cue.identifier} lanzada`);
+        if (trackStartPlan) commitTrackStart(trackStartPlan, now, mode);
         isLaunchingRef.current = false;
         setIsLaunchingCue(false);
         return;
@@ -995,6 +1115,7 @@ export function OperationMode() {
       announceMilestone(isFinished
         ? `Cue ${cue.identifier} lanzada. Función finalizada`
         : `Cue ${cue.identifier} lanzada`);
+      if (trackStartPlan) commitTrackStart(trackStartPlan, now, mode);
 
       if (isFinished) {
         runStartedAt.current = null;
@@ -1248,6 +1369,7 @@ export function OperationMode() {
     setDanceSelectedCueId(null);
     setDanceFinishedReportId(null);
     setDancePreviousOpenRecords([]);
+    setIsRecordLogOpen(false);
     pendingDanceLaunchRef.current = null;
     setBreakStartedAt(null);
     breakStartedAtRef.current = null;
@@ -1341,6 +1463,10 @@ export function OperationMode() {
     ? (danceMode === "rehearsal"
         ? danceSequence.find((cue) => cue.id === danceSelectedCueId) ?? danceCandidate
         : danceCandidate)
+    : undefined;
+  const danceStartsTrackId = danceLaunchCue?.timing?.startsTrackId;
+  const danceStartsTrackTitle = danceStartsTrackId
+    ? danceTracks.find((track) => track.id === danceStartsTrackId)?.title
     : undefined;
   const danceCandidateIndex = danceCandidate
     ? danceSequence.findIndex((item) => item.id === danceCandidate.id)
@@ -1480,6 +1606,85 @@ export function OperationMode() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [activeScriptCue?.id, isLibretoOpen, scriptPage, totalScriptPages]);
+
+  // The closing panel lives in the right column, under the preparation panel.
+  // It is rendered here once and placed in the control rail only when the
+  // libreto view hides that column.
+  const cierreSection = danceProduction && danceMode === "show" ? (
+    <section
+      aria-label="Cierre de función"
+      className="rounded-2xl border border-slate-700 bg-slate-950 p-5"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-cyan-200">Cierre de función</h3>
+        {danceFinishedReportId && (
+          <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300">
+            Finalizada
+          </span>
+        )}
+      </div>
+      <div className="mt-4 flex flex-wrap gap-3">
+        <button
+          type="button"
+          onClick={() => void handleFinishDanceShow()}
+          disabled={!danceShowBlockedByRecord}
+          aria-describedby={danceFinishReason ? DANCE_FINISH_REASON_ID : undefined}
+          className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-4 py-2 text-sm font-semibold text-cyan-100 hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+        >
+          Finalizar función
+        </button>
+        {danceShowBlockedByRecord && (
+          <button
+            type="button"
+            onClick={() => void handleDiscardDanceShow()}
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-200 hover:bg-rose-500/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-300"
+          >
+            Descartar función
+          </button>
+        )}
+        {danceFinishedReportId && (
+          <Link
+            href={`/reportes/imprimir?performance=${danceFinishedReportId}`}
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-slate-600 bg-slate-900 px-4 py-2 text-sm font-semibold text-cyan-200 hover:border-cyan-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+          >
+            Ver informe
+          </Link>
+        )}
+        <button
+          type="button"
+          onClick={() => setIsRecordLogOpen((open) => !open)}
+          aria-expanded={isRecordLogOpen}
+          aria-controls={DANCE_RECORD_LOG_ID}
+          className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-slate-600 bg-slate-900 px-4 py-2 text-sm font-semibold text-slate-200 hover:border-slate-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+        >
+          Registro de funciones
+        </button>
+      </div>
+      {danceFinishReason && (
+        <p id={DANCE_FINISH_REASON_ID} className="mt-3 text-xs text-amber-300">
+          {danceFinishReason}
+        </p>
+      )}
+      <div
+        id={DANCE_RECORD_LOG_ID}
+        hidden={!isRecordLogOpen}
+        className="mt-4 rounded-xl border border-slate-700 bg-slate-900/60 px-3 py-2"
+      >
+        <p className="text-xs font-semibold text-slate-300">Registros de sesiones anteriores</p>
+        {dancePreviousOpenRecords.length === 0 ? (
+          <p className="mt-1 text-xs text-slate-400">No hay registros de sesiones anteriores.</p>
+        ) : (
+          <ul className="mt-1 space-y-1">
+            {dancePreviousOpenRecords.map((record) => (
+              <li key={record.id} className="text-xs text-slate-400">
+                registro de una sesión anterior: {record.title} · {record.date} {record.time}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  ) : null;
 
   return (
     <Card className={`border-slate-800 bg-slate-900/80 ${
@@ -1806,83 +2011,9 @@ export function OperationMode() {
             )}
           </section>
 
-          {danceProduction && danceMode === "show" && (
-            <section
-              aria-label="Cierre de función"
-              className="rounded-2xl border border-slate-700 bg-slate-950 p-5"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <h3 className="text-sm font-semibold text-cyan-200">Cierre de función</h3>
-                {danceFinishedReportId && (
-                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300">
-                    Finalizada
-                  </span>
-                )}
-              </div>
-              <div className="mt-4 flex flex-wrap gap-3">
-                <button
-                  type="button"
-                  onClick={() => void handleFinishDanceShow()}
-                  disabled={!danceShowBlockedByRecord}
-                  aria-describedby={danceFinishReason ? DANCE_FINISH_REASON_ID : undefined}
-                  className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-4 py-2 text-sm font-semibold text-cyan-100 hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
-                >
-                  Finalizar función
-                </button>
-                {danceShowBlockedByRecord && (
-                  <button
-                    type="button"
-                    onClick={() => void handleDiscardDanceShow()}
-                    className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-200 hover:bg-rose-500/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-300"
-                  >
-                    Descartar función
-                  </button>
-                )}
-                {danceFinishedReportId && (
-                  <Link
-                    href={`/reportes/imprimir?performance=${danceFinishedReportId}`}
-                    className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-xl border border-slate-600 bg-slate-900 px-4 py-2 text-sm font-semibold text-cyan-200 hover:border-cyan-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
-                  >
-                    Ver informe
-                  </Link>
-                )}
-              </div>
-              {danceFinishReason && (
-                <p id={DANCE_FINISH_REASON_ID} className="mt-3 text-xs text-amber-300">
-                  {danceFinishReason}
-                </p>
-              )}
-              {dancePreviousOpenRecords.length > 0 && (
-                <div className="mt-4 rounded-xl border border-slate-700 bg-slate-900/60 px-3 py-2">
-                  <p className="text-xs font-semibold text-slate-300">Registros de sesiones anteriores</p>
-                  <ul className="mt-1 space-y-1">
-                    {dancePreviousOpenRecords.map((record) => (
-                      <li key={record.id} className="text-xs text-slate-400">
-                        registro de una sesión anterior: {record.title} · {record.date} {record.time}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </section>
-          )}
-
-          {danceProduction && (
-            <div className="space-y-4">
-              <ShowClock />
-              <TrackPanel
-                productionId={danceProduction.id}
-                tracks={danceTracks}
-                cues={cues ?? []}
-                mode={executionMode ?? "show"}
-                notReachedIds={danceNotReachedIds}
-                onTracksChanged={() => void reloadDanceTracks()}
-                onTrackClosed={handleTrackClosed}
-                onNotReached={handleNotReached}
-                onAnnounce={announceMilestone}
-              />
-            </div>
-          )}
+          {/* With the libreto open the right column is hidden, so the closing
+              controls stay reachable at the end of this rail. */}
+          {isLibretoOpen && cierreSection}
 
           {showOperationTabs && (
             <div role="tablist" aria-label="Pestañas de función" className="flex flex-wrap gap-3 border-b border-slate-700">
@@ -2085,19 +2216,6 @@ export function OperationMode() {
                           Cue {nextCueNumber} de {cues?.length ?? 0}
                         </span>
                       </div>
-                      {danceProduction && danceLaunchCue && danceResolved && (
-                        <Countdown
-                          cue={danceLaunchCue}
-                          resolved={danceResolved}
-                          trackState={danceTrackState}
-                          trackActiveMs={danceTrackActiveMs}
-                          showActiveMs={danceShowActiveMs}
-                          isNext
-                          launched={false}
-                          onLaunch={() => void handleLaunchCue(danceLaunchCue)}
-                          launchDisabledReason={danceLaunchDisabledReason}
-                        />
-                      )}
                       <div className="flex flex-wrap items-start justify-between gap-4">
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
@@ -2113,36 +2231,52 @@ export function OperationMode() {
                           <p className="mt-2 text-xs text-slate-500">
                             {nextCue.act} · Escena {nextCue.scene} · {nextCue.department}
                           </p>
+                          {danceStartsTrackTitle && (
+                            <p className="mt-2 text-xs font-semibold text-cyan-200">
+                              Al pinchar este cue se inicia el track «{danceStartsTrackTitle}».
+                            </p>
+                          )}
                         </div>
-                        <button
-                          ref={launchButtonRef}
-                          type="button"
-                          disabled={
-                            isLaunchingCue || timerState === "finished" || !nextCue
-                            || Boolean(danceProduction && danceLaunchDisabledReason)
-                          }
-                          onClick={() => void handleLaunchCue(danceProduction ? danceLaunchCue : undefined)}
-                          // A held key repeats its default activation (RF7a). The
-                          // click is a mouse event and cannot see `event.repeat`,
-                          // so the repeated keydown default action is cancelled
-                          // here: only the first press of the held key launches.
-                          onKeyDown={(event) => {
-                            if (event.repeat) event.preventDefault();
-                          }}
-                          aria-label={`${getLaunchActionLabel(nextCue.type, nextCue.includedTypes)} cue ${nextCue.identifier}`}
-                          aria-describedby={launchCueReason ? DANCE_LAUNCH_REASON_ID : undefined}
-                          style={scaledSmStyle}
-                          className="inline-flex min-h-11 min-w-11 max-w-full items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300"
-                        >
-                          <Play className="h-4 w-4" />
-                          {getLaunchActionLabel(nextCue.type, nextCue.includedTypes)}
-                        </button>
-                        {launchCueReason && (
-                          <p id={DANCE_LAUNCH_REASON_ID} className="min-w-0 break-words text-xs font-medium text-amber-300">
-                            {launchCueReason}
-                          </p>
-                        )}
+                        <div className="flex flex-none items-center gap-3">
+                          {danceProduction && danceLaunchCue && danceResolved && (
+                            <Countdown
+                              cue={danceLaunchCue}
+                              resolved={danceResolved}
+                              trackState={danceTrackState}
+                              trackActiveMs={danceTrackActiveMs}
+                              showActiveMs={danceShowActiveMs}
+                            />
+                          )}
+                          <button
+                            ref={launchButtonRef}
+                            type="button"
+                            disabled={
+                              isLaunchingCue || timerState === "finished" || !nextCue
+                              || Boolean(danceProduction && danceLaunchDisabledReason)
+                            }
+                            onClick={() => void handleLaunchCue(danceProduction ? danceLaunchCue : undefined)}
+                            // A held key repeats its default activation (RF7a). The
+                            // click is a mouse event and cannot see `event.repeat`,
+                            // so the repeated keydown default action is cancelled
+                            // here: only the first press of the held key launches.
+                            onKeyDown={(event) => {
+                              if (event.repeat) event.preventDefault();
+                            }}
+                            aria-label={`${getLaunchActionLabel(nextCue.type, nextCue.includedTypes)} cue ${nextCue.identifier}`}
+                            aria-describedby={launchCueReason ? DANCE_LAUNCH_REASON_ID : undefined}
+                            style={scaledSmStyle}
+                            className="inline-flex min-h-11 min-w-11 max-w-full items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300"
+                          >
+                            <Play className="h-4 w-4" />
+                            {getLaunchActionLabel(nextCue.type, nextCue.includedTypes)}
+                          </button>
+                        </div>
                       </div>
+                      {launchCueReason && (
+                        <p id={DANCE_LAUNCH_REASON_ID} className="mt-3 min-w-0 break-words text-xs font-medium text-amber-300">
+                          {launchCueReason}
+                        </p>
+                      )}
                     </div>
                   ) : (
                     <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-sm text-emerald-200">
@@ -2210,6 +2344,24 @@ export function OperationMode() {
               ) : (
                 "Esta producción no tiene cues para lanzar."
               )}
+            </section>
+          )}
+
+          {/* Tracks go under the cues: in function mode cues and the clock are
+              the primary surface, and a sound cue can start a track in place. */}
+          {danceProduction && (
+            <section aria-label="Tracks de la función" className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+              <TrackPanel
+                productionId={danceProduction.id}
+                tracks={danceTracks}
+                cues={cues ?? []}
+                mode={executionMode ?? "show"}
+                notReachedIds={danceNotReachedIds}
+                onTracksChanged={() => void reloadDanceTracks()}
+                onTrackClosed={handleTrackClosed}
+                onNotReached={handleNotReached}
+                onAnnounce={announceMilestone}
+              />
             </section>
           )}
         </div>
@@ -2316,6 +2468,7 @@ export function OperationMode() {
             </fieldset>
           </section>
 
+          {cierreSection}
         </div>
         )}
       </div>

@@ -143,6 +143,8 @@ export function buildTemplateFromSchedule({
 
     const linkedTrackId = cue.timing?.trackId;
     const linkedTrackExists = linkedTrackId !== undefined && trackById.has(linkedTrackId);
+    const startedTrackId = cue.timing?.startsTrackId;
+    const startedTrackExists = startedTrackId !== undefined && trackById.has(startedTrackId);
     if (selectedLooseIds.has(cue.id) && linkedTrackExists && !selectedTrackIds.has(linkedTrackId!)) {
       const title = trackById.get(linkedTrackId!)?.title ?? linkedTrackId;
       throw new Error(
@@ -151,18 +153,24 @@ export function buildTemplateFromSchedule({
     }
     if (linkedTrackId !== undefined && trackKeys.has(linkedTrackId)) {
       includedCues.push(cue);
+    } else if (startedTrackExists && selectedTrackIds.has(startedTrackId!)) {
+      includedCues.push(cue);
     } else if (selectedLooseIds.has(cue.id)) {
       includedCues.push(cue);
     }
   }
 
-  const cues: ScheduleTemplateCue[] = includedCues.map((cue) => {
+  const cues: ScheduleTemplateCue[] = includedCues.map((cue, index) => {
     if (cue.type === "SIM" && (cue.includedTypes?.length ?? 0) < 2) {
       throw new Error(`El cue simultáneo «${cue.identifier}» necesita al menos dos tipos.`);
     }
 
     const timing = cue.timing;
     const key = timing?.trackId !== undefined ? trackKeys.get(timing.trackId) : undefined;
+    const startsKey = timing?.startsTrackId !== undefined
+      ? trackKeys.get(timing.startsTrackId)
+      : undefined;
+    const startLink = startsKey !== undefined ? { startsTrackKey: startsKey } : {};
     if (key && timing?.trackOffsetMs !== undefined) {
       const track = trackById.get(timing.trackId!);
       const duration = track?.durationMs;
@@ -198,15 +206,16 @@ export function buildTemplateFromSchedule({
       status: "Borrador",
       executionState: "Preparación",
       alertBeforeMs,
+      order: cue.order ?? index,
     };
 
     if (key && timing?.trackOffsetMs !== undefined) {
-      return { ...base, trackKey: key, trackOffsetMs: timing.trackOffsetMs };
+      return { ...base, trackKey: key, trackOffsetMs: timing.trackOffsetMs, ...startLink };
     }
     if (timing?.atMs !== undefined) {
-      return { ...base, atMs: timing.atMs };
+      return { ...base, atMs: timing.atMs, ...startLink };
     }
-    return base;
+    return { ...base, ...startLink };
   });
 
   const template: ScheduleTemplate = {
@@ -279,7 +288,18 @@ export function validateTemplateFile(input: unknown, now: number):
       status: cue.status,
       executionState: cue.executionState,
       alertBeforeMs: cue.alertBeforeMs,
+      ...(cue.startsTrackKey !== undefined ? { startsTrackKey: cue.startsTrackKey } : {}),
+      ...(cue.order !== undefined ? { order: cue.order } : {}),
     };
+
+    if (cue.startsTrackKey !== undefined
+      && !file.template.tracks.some((candidate) => candidate.key === cue.startsTrackKey)) {
+      repairs.count += 1;
+      repairs.messages.push(
+        `El cue «${cue.identifier}» iniciaba el track «${cue.startsTrackKey}», que no existe; se ha desvinculado.`,
+      );
+      delete base.startsTrackKey;
+    }
 
     if (cue.trackKey !== undefined) {
       const track = file.template.tracks.find((candidateTrack) => candidateTrack.key === cue.trackKey);
@@ -380,6 +400,7 @@ export function buildTemplateExport({ template, kind, now }: BuildTemplateExport
       status: cue.status,
       executionState: cue.executionState,
       ...(cue.trackKey !== undefined ? { trackKey: cue.trackKey } : {}),
+      ...(cue.startsTrackKey !== undefined ? { startsTrackKey: cue.startsTrackKey } : {}),
       ...(cue.trackOffsetMs !== undefined ? { trackOffsetMs: cue.trackOffsetMs } : {}),
       ...(cue.atMs !== undefined ? { atMs: cue.atMs } : {}),
       alertBeforeMs: cue.alertBeforeMs,
@@ -430,7 +451,7 @@ export function applyTemplateToProject({
     notes: track.notes,
   }));
 
-  const cues: Cue[] = validated.cues.map((cue) => {
+  const cues: Cue[] = validated.cues.map((cue, index) => {
     const trackId = cue.trackKey !== undefined ? idsByKey.get(cue.trackKey) : undefined;
     const timing: CueTiming = { alertBeforeMs: cue.alertBeforeMs };
     if (trackId !== undefined && cue.trackOffsetMs !== undefined) {
@@ -438,6 +459,10 @@ export function applyTemplateToProject({
       timing.trackOffsetMs = cue.trackOffsetMs;
     } else if (cue.atMs !== undefined) {
       timing.atMs = cue.atMs;
+    }
+    if (cue.startsTrackKey !== undefined) {
+      const startsTrackId = idsByKey.get(cue.startsTrackKey);
+      if (startsTrackId !== undefined) timing.startsTrackId = startsTrackId;
     }
     return {
       id: createId(now),
@@ -453,6 +478,7 @@ export function applyTemplateToProject({
       observations: cue.observations,
       status: cue.status,
       executionState: cue.executionState,
+      order: cue.order ?? index,
       timing,
     };
   });

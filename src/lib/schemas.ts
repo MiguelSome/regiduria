@@ -43,6 +43,7 @@ const cueTimingSchema = z.object({
   trackOffsetMs: z.number().int().min(0).optional(),
   atMs: z.number().int().min(0).max(86_400_000).optional(),
   alertBeforeMs: z.number().int().min(1_000).max(60_000).optional(),
+  startsTrackId: z.string().optional(),
 });
 
 export const productionSchema = z.object({
@@ -86,6 +87,9 @@ export const cueSchema = z.object({
   observations: z.string(),
   status: z.enum(["Borrador", "Preparado", "Ejecutado", "Pendiente"]),
   executionState: z.enum(["Preparación", "Función"]),
+  order: z.number({ error: "El orden del cue debe ser un número." })
+    .int({ error: "El orden del cue debe ser un número entero." })
+    .optional(),
   scriptDocumentId: z.string().optional(),
   scriptLabelId: z.string().optional(),
 }).refine((cue) => cue.type !== "SIM" || (cue.includedTypes?.length ?? 0) >= 2, {
@@ -283,6 +287,10 @@ export const scheduleTemplateCueSchema = z.object({
     nullAsUndefined,
     z.string().min(1, { error: "La clave de track no puede estar vacía." }).optional(),
   ),
+  startsTrackKey: z.preprocess(
+    nullAsUndefined,
+    z.string().min(1, { error: "La clave del track iniciado no puede estar vacía." }).optional(),
+  ),
   trackOffsetMs: z.preprocess(nullAsUndefined, z.number({ error: "El objetivo del cue debe ser un número." })
     .int({ error: "El objetivo del cue debe ser un número entero." })
     .min(0, { error: "El objetivo del cue no puede ser negativo." })
@@ -297,6 +305,9 @@ export const scheduleTemplateCueSchema = z.object({
     .min(1_000, { error: "El umbral de aviso debe ser al menos 1000 ms." })
     .max(60_000, { error: "El umbral de aviso no puede superar 60000 ms." })
     .default(10_000),
+  order: z.preprocess(nullAsUndefined, z.number({ error: "El orden del cue debe ser un número." })
+    .int({ error: "El orden del cue debe ser un número entero." })
+    .optional()),
 }).passthrough().refine(
   (cue) => cue.type !== "SIM" || (cue.includedTypes?.length ?? 0) >= 2,
   {

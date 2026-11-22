@@ -527,10 +527,20 @@ export async function deleteDanceTrack(id: string): Promise<number> {
 
     let unlinkedCueCount = 0;
     for (const cue of cues) {
-      if (cue.timing?.trackId !== id) continue;
+      const wasLinked = cue.timing?.trackId === id;
+      const wasStarted = cue.timing?.startsTrackId === id;
+      if (!wasLinked && !wasStarted) continue;
 
-      const materialized = materializeAtMs(cue, schedule, now);
-      await regiduriaDb.cues.update(cue.id, { timing: materialized.timing });
+      // An absolute target is preserved when its track disappears; a cue that
+      // only started the track keeps its remaining timing fields (D35/RF6c).
+      const nextTiming = wasLinked
+        ? materializeAtMs(cue, schedule, now).timing
+        : (() => {
+            const timing = { ...cue.timing };
+            delete timing.startsTrackId;
+            return Object.keys(timing).length > 0 ? timing : undefined;
+          })();
+      await regiduriaDb.cues.update(cue.id, { timing: nextTiming });
       unlinkedCueCount += 1;
     }
 

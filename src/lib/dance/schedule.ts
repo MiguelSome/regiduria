@@ -206,6 +206,11 @@ function compareCuesForSchedule(
     if (firstAtMs !== undefined && secondAtMs !== undefined && firstAtMs !== secondAtMs) {
       return firstAtMs - secondAtMs;
     }
+    // Manual order decides ties (and all untimed cues); legacy cues without
+    // an explicit order keep the previous natural-identifier fallback.
+    if (first.order !== undefined && second.order !== undefined && first.order !== second.order) {
+      return first.order - second.order;
+    }
     return naturalIdentifierCompare(first.identifier, second.identifier)
       || compareText(first.id, second.id);
   };

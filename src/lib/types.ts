@@ -104,6 +104,8 @@ export interface CueTiming {
   trackOffsetMs?: number;
   atMs?: number;
   alertBeforeMs?: number;
+  /** Track started when this cue is launched (e.g. a sound cue that plays a song). */
+  startsTrackId?: string;
 }
 
 /** A track with its derived start/end. Computed by buildSchedule; never persisted. */
@@ -187,6 +189,8 @@ export interface Cue {
   observations: string;
   status: CueStatus;
   executionState: "Preparación" | "Función";
+  /** Manual position in the cue list. Lower numbers go first. */
+  order?: number;
   scriptDocumentId?: string;
   scriptLabelId?: string;
   includedTypes?: CueComponentType[];
@@ -218,6 +222,8 @@ export interface ScheduleTemplateCue {
   trackOffsetMs?: number;
   atMs?: number;
   alertBeforeMs: number;
+  startsTrackKey?: string;
+  order?: number;
 }
 
 export interface ScheduleTemplate {

@@ -145,6 +145,9 @@ function templateToScheduleEntities(template: ScheduleTemplate): {
     } else if (cue.atMs !== undefined) {
       timing.atMs = cue.atMs;
     }
+    if (cue.startsTrackKey !== undefined && knownKeys.has(cue.startsTrackKey)) {
+      timing.startsTrackId = cue.startsTrackKey;
+    }
 
     return {
       id: `template-cue-${index}`,
@@ -162,6 +165,7 @@ function templateToScheduleEntities(template: ScheduleTemplate): {
       observations: cue.observations,
       status: cue.status,
       executionState: cue.executionState,
+      order: cue.order ?? index,
       timing: Object.keys(timing).length > 0 ? timing : undefined,
     };
   });

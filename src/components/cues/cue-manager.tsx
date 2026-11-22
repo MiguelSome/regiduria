@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Save, Trash2, Wrench } from "lucide-react";
+import { ArrowDown, ArrowUp, Save, Trash2, Wrench } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CueTypeBadge } from "@/components/cues/cue-type-badge";
@@ -36,6 +36,7 @@ import { useUiStore } from "@/store/ui-store";
 const DEFAULT_ALERT_MS = 10_000;
 const MAX_ABSOLUTE_MS = 24 * 60 * 60 * 1000;
 const TRACK_SELECT_ID = "cue-track-select";
+const STARTS_TRACK_SELECT_ID = "cue-starts-track-select";
 const TIME_INPUT_ID = "cue-timing-input";
 const CALCULATED_TIME_ID = "cue-calculated-time";
 const ALERT_INPUT_ID = "cue-alert-before";
@@ -57,6 +58,15 @@ const emptyCue: Cue = {
   executionState: "Preparación",
 };
 
+/** Manual position first; the identifier keeps an old list deterministic. */
+function compareCuesForList(first: Cue, second: Cue): number {
+  if (first.order !== undefined && second.order !== undefined && first.order !== second.order) {
+    return first.order - second.order;
+  }
+  return first.identifier.localeCompare(second.identifier, "es", { numeric: true })
+    || first.id.localeCompare(second.id);
+}
+
 type CueTypeFilter = CueType | "Todas";
 
 function getNextIdentifier(cues: Cue[], type: CueType): string {
@@ -76,6 +86,7 @@ interface TimingDraft {
   targetText: string;
   absoluteText: string;
   alertText: string;
+  startsTrackId: string;
   touched: boolean;
 }
 
@@ -86,6 +97,7 @@ function draftFromCue(cue: Cue): TimingDraft {
     targetText: timing?.trackOffsetMs !== undefined ? formatClock(timing.trackOffsetMs) : "",
     absoluteText: timing?.atMs !== undefined ? formatClock(timing.atMs) : "",
     alertText: String(timing?.alertBeforeMs ?? DEFAULT_ALERT_MS),
+    startsTrackId: timing?.startsTrackId ?? "",
     touched: false,
   };
 }
@@ -107,6 +119,22 @@ function validateTimingDraft(
     return { error: "El aviso previo debe ser un número entero entre 1000 y 60000 ms (de 1 a 60 segundos)." };
   }
 
+  let startsTrackId: string | undefined;
+  if (draft.startsTrackId) {
+    const starterTrack = tracks.find((item) => item.id === draft.startsTrackId);
+    if (!starterTrack) {
+      return { error: "El track que se iniciará ya no existe. Elige un track válido o quita el vínculo." };
+    }
+    if (starterTrack.durationMs === undefined || !Number.isFinite(starterTrack.durationMs) || starterTrack.durationMs <= 0) {
+      return { error: `El track «${starterTrack.title}» no tiene una duración válida; añádela para poder iniciarlo desde un cue.` };
+    }
+    if (draft.trackId === starterTrack.id) {
+      return { error: "Un cue que inicia un track no puede tener además un objetivo dentro de ese mismo track." };
+    }
+    startsTrackId = starterTrack.id;
+  }
+  const startLink = startsTrackId !== undefined ? { startsTrackId } : {};
+
   if (draft.trackId) {
     const track = tracks.find((item) => item.id === draft.trackId);
     if (!track) {
@@ -127,11 +155,11 @@ function validateTimingDraft(
     if (trackOffsetMs > durationMs) {
       return { error: `El objetivo debe estar entre 00:00 y ${formatClock(durationMs)} (duración del track «${track.title}»).` };
     }
-    return { timing: { trackId: track.id, trackOffsetMs, alertBeforeMs } };
+    return { timing: { trackId: track.id, trackOffsetMs, alertBeforeMs, ...startLink } };
   }
 
   const absoluteText = draft.absoluteText.trim();
-  if (!absoluteText) return { timing: { alertBeforeMs } };
+  if (!absoluteText) return { timing: { alertBeforeMs, ...startLink } };
   const atMs = parseDurationToMs(absoluteText);
   if (atMs === null) {
     return { error: "El tiempo absoluto debe usar el formato mm:ss o h:mm:ss (por ejemplo 12:30)." };
@@ -139,7 +167,7 @@ function validateTimingDraft(
   if (atMs > MAX_ABSOLUTE_MS) {
     return { error: "El tiempo absoluto no puede superar 24:00:00." };
   }
-  return { timing: { atMs, alertBeforeMs } };
+  return { timing: { atMs, alertBeforeMs, ...startLink } };
 }
 
 export function CueManager() {
@@ -151,6 +179,7 @@ export function CueManager() {
   const [trackLoadError, setTrackLoadError] = useState<string | null>(null);
   const [timingDraft, setTimingDraft] = useState<TimingDraft>(() => draftFromCue(emptyCue));
   const [timingError, setTimingError] = useState<string | null>(null);
+  const [reorderError, setReorderError] = useState<string | null>(null);
   const timingKeyRef = useRef(`${emptyCue.id}::${emptyCue.productionId}`);
   const editCueHandled = useRef(false);
   const activeProjectId = useUiStore((state) => state.selectedProjectId);
@@ -277,7 +306,9 @@ export function CueManager() {
   }, [form]);
 
   const productionCues = useMemo(
-    () => cues.filter((cue) => cue.productionId === selectedProductionId),
+    () => cues
+      .filter((cue) => cue.productionId === selectedProductionId)
+      .sort(compareCuesForList),
     [cues, selectedProductionId],
   );
   const visibleCues = useMemo(
@@ -294,13 +325,16 @@ export function CueManager() {
 
   const previewTiming = useMemo<CueTiming | undefined>(() => {
     const alertBeforeMs = parseAlertMs(timingDraft.alertText) ?? DEFAULT_ALERT_MS;
+    const startLink = timingDraft.startsTrackId
+      ? { startsTrackId: timingDraft.startsTrackId }
+      : {};
     if (timingDraft.trackId) {
       const trackOffsetMs = parseDurationToMs(timingDraft.targetText);
       if (trackOffsetMs === null) return undefined;
-      return { trackId: timingDraft.trackId, trackOffsetMs, alertBeforeMs };
+      return { trackId: timingDraft.trackId, trackOffsetMs, alertBeforeMs, ...startLink };
     }
     const atMs = parseDurationToMs(timingDraft.absoluteText);
-    return { ...(atMs !== null ? { atMs } : {}), alertBeforeMs };
+    return { ...(atMs !== null ? { atMs } : {}), alertBeforeMs, ...startLink };
   }, [timingDraft]);
 
   const resolvedTiming = useMemo(
@@ -363,8 +397,10 @@ export function CueManager() {
     }
     setTimingError(null);
 
+    const nextOrder = Math.max(-1, ...productionCues.map((item) => item.order ?? 0)) + 1;
     const normalized: Cue = {
       ...form,
+      order: form.order ?? nextOrder,
       timing: timingForSave,
       id: form.id || crypto.randomUUID(),
       productionId: selectedProductionId,
@@ -378,6 +414,34 @@ export function CueManager() {
     const nextCues = await getCuesByProduction(selectedProductionId);
     setCues(nextCues);
     setForm({ ...normalized });
+  };
+
+  /** Swaps a cue with its visible neighbour and renumbers the whole production. */
+  const handleMoveCue = async (cue: Cue, direction: -1 | 1): Promise<void> => {
+    const visibleIndex = visibleCues.findIndex((item) => item.id === cue.id);
+    const neighbor = visibleCues[visibleIndex + direction];
+    if (!neighbor) return;
+
+    const reordered = [...productionCues];
+    const from = reordered.findIndex((item) => item.id === cue.id);
+    const to = reordered.findIndex((item) => item.id === neighbor.id);
+    if (from < 0 || to < 0) return;
+    [reordered[from], reordered[to]] = [reordered[to], reordered[from]];
+
+    try {
+      for (const [index, item] of reordered.entries()) {
+        if (item.order === index) continue;
+        await saveCue({ ...item, order: index });
+      }
+      setForm((current) => {
+        const moved = reordered.find((item) => item.id === current.id);
+        return moved ? { ...current, order: moved.order } : current;
+      });
+      setReorderError(null);
+      setCues(await getCuesByProduction(selectedProductionId));
+    } catch {
+      setReorderError("No se pudo reordenar las cues. Inténtalo de nuevo.");
+    }
   };
 
   const handleDelete = async (cue: Cue) => {
@@ -439,6 +503,12 @@ export function CueManager() {
             </div>
           </div>
 
+          {reorderError && (
+            <p role="alert" className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
+              {reorderError}
+            </p>
+          )}
+
           <div className="flex flex-wrap gap-3" role="group" aria-label="Filtrar cues por tipo">
             <Button
               type="button"
@@ -475,7 +545,7 @@ export function CueManager() {
                   ? "Esta producción aún no tiene cues. Crea uno para empezar."
                   : `No hay cues de tipo ${selectedType} en esta producción.`}
             </p>
-          ) : visibleCues.map((cue) => (
+          ) : visibleCues.map((cue, index) => (
             <div key={cue.id} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -503,7 +573,7 @@ export function CueManager() {
                 <span>{cue.department}</span>
               </div>
 
-              <div className="mt-4 flex items-center gap-3">
+              <div className="mt-4 flex flex-wrap items-center gap-3">
                 <Button type="button" onClick={() => setForm(cue)} className="border-slate-700 bg-slate-900 text-slate-100">
                   Editar
                 </Button>
@@ -511,6 +581,32 @@ export function CueManager() {
                   <Trash2 className="mr-2 h-4 w-4" />
                   Borrar
                 </Button>
+                <div
+                  role="group"
+                  aria-label={`Reordenar cue ${cue.identifier}`}
+                  className="ml-auto flex items-center gap-2"
+                >
+                  <Button
+                    type="button"
+                    aria-label={`Subir cue ${cue.identifier}`}
+                    title="Subir cue"
+                    disabled={index === 0}
+                    onClick={() => void handleMoveCue(cue, -1)}
+                    className="border-slate-700 bg-slate-900 px-3 text-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <ArrowUp className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    type="button"
+                    aria-label={`Bajar cue ${cue.identifier}`}
+                    title="Bajar cue"
+                    disabled={index === visibleCues.length - 1}
+                    onClick={() => void handleMoveCue(cue, 1)}
+                    className="border-slate-700 bg-slate-900 px-3 text-slate-200 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <ArrowDown className="h-4 w-4" />
+                  </Button>
+                </div>
               </div>
             </div>
           ))}
@@ -765,10 +861,30 @@ export function CueManager() {
                     className={timingInputClass}
                   />
                   <span id={`${TIME_INPUT_ID}-hint`} className="block text-xs text-slate-400">
-                    mm:ss u h:mm:ss desde el inicio del espectáculo. Máximo 24:00:00; déjalo vacío para dejar el cue sin tiempo.
+                    mm:ss u h:mm:ss desde el inicio de la función. Máximo 24:00:00; déjalo vacío para dejar el cue sin tiempo.
                   </span>
                 </label>
               )}
+
+              <label className="block space-y-2 text-sm text-slate-300" htmlFor={STARTS_TRACK_SELECT_ID}>
+                <span>Vincular a track</span>
+                <select
+                  id={STARTS_TRACK_SELECT_ID}
+                  value={timingDraft.startsTrackId}
+                  onChange={(event) => setTimingField("startsTrackId", event.target.value)}
+                  aria-invalid={Boolean(timingError)}
+                  aria-describedby={timingError ? TIMING_ERROR_ID : undefined}
+                  className={timingInputClass}
+                >
+                  <option value="">Sin vínculo</option>
+                  {danceTracks.map((track) => (
+                    <option key={track.id} value={track.id}>{track.title}</option>
+                  ))}
+                </select>
+                <span className="block text-xs text-slate-400">
+                  Elige un track existente. Al pinchar este cue (por ejemplo, «Pincha» en sonido), el track vinculado comienza desde cero sin buscarlo en la lista.
+                </span>
+              </label>
 
               <label className="block space-y-2 text-sm text-slate-300" htmlFor={ALERT_INPUT_ID}>
                 <span>Avisar antes (ms)</span>

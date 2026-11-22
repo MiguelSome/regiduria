@@ -14,7 +14,7 @@ export const LAUNCH_REASON_NOT_NEXT =
 export const LAUNCH_REASON_ADD_DURATION = "Añade una duración para lanzar este track.";
 export const LAUNCH_REASON_NO_EDIT_IN_SHOW = "En función la escaleta no se edita. Cambia a Ensayo.";
 /** Complement for an `atMs` cue whose show clock has not been started (CL19/CL57). */
-export const LAUNCH_REASON_START_SHOW_CLOCK = "Inicia el espectáculo para lanzar esta cue.";
+export const LAUNCH_REASON_START_SHOW_CLOCK = "Inicia la función para lanzar esta cue.";
 
 /**
  * Active (pause-free) elapsed time. One shared base for tracks, the show clock

@@ -181,6 +181,15 @@ export function TrackPanel({
     return map;
   }, [cues, schedule]);
 
+  const starterCueByTrack = useMemo(() => {
+    const map = new Map<string, Cue>();
+    for (const cue of cues) {
+      const trackId = cue.timing?.startsTrackId;
+      if (trackId) map.set(trackId, cue);
+    }
+    return map;
+  }, [cues]);
+
   const warningsByTrack = useMemo(() => {
     const map = new Map<string, string[]>();
     for (const warning of schedule.warnings) {
@@ -608,6 +617,12 @@ export function TrackPanel({
                     </span>
                   )}
                 </div>
+
+                {starterCueByTrack.has(track.id) && (
+                  <p style={scaledTinyStyle} className="mt-2 min-w-0 break-words text-cyan-200">
+                    Se inicia con el cue {starterCueByTrack.get(track.id)?.identifier}.
+                  </p>
+                )}
 
                 {variant === "operation" ? (
                   <dl className="mt-3 grid min-w-0 grid-cols-2 gap-2 text-xs sm:grid-cols-4" aria-live="off">
