@@ -107,6 +107,7 @@ export function LibretoViewer() {
   const selectedProjectId = useUiStore((state) => state.selectedProjectId);
   const setSelectedProjectId = useUiStore((state) => state.setSelectedProjectId);
   const production = projects.find((project) => project.id === selectedProjectId) ?? noProduction;
+  const isDanceProduction = production.mode === "dance";
   const [projectsLoading, setProjectsLoading] = useState(true);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -691,8 +692,14 @@ export function LibretoViewer() {
               <div className="flex min-h-64 flex-col items-center justify-center gap-4 text-center text-slate-700">
                 <FileText className="h-12 w-12 text-slate-400" />
                 <div>
-                  <p className="text-lg font-medium">No hay PDF cargado</p>
-                  <p className="text-sm">Importa un documento para visualizarlo y marcarlo.</p>
+                  {isDanceProduction && !scriptDocument ? (
+                    <p className="text-lg font-medium">Este proyecto no tiene un PDF de libreto.</p>
+                  ) : (
+                    <>
+                      <p className="text-lg font-medium">No hay PDF cargado</p>
+                      <p className="text-sm">Importa un documento para visualizarlo y marcarlo.</p>
+                    </>
+                  )}
                 </div>
               </div>
             )}
